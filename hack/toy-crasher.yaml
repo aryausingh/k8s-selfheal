@@ -1,0 +1,21 @@
+# toy-crasher.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: toy-crasher
+  labels:
+    app: toy-crasher
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: toy-crasher
+  template:
+    metadata:
+      labels:
+        app: toy-crasher
+    spec:
+      containers:
+        - name: crasher
+          image: busybox
+          command: ["sh", "-c", "sleep 1; exit 1"]
