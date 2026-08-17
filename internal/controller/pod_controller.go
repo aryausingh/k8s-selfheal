@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,6 +19,42 @@ import (
 type PodReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
+
+	// inFlight tracks Deployments currently undergoing remediation, keyed by
+	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
+	// deletes the crash-looping pod and the ReplicaSet controller creates a
+	// replacement with a brand-new UID; a UID-keyed guard would not recognize
+	// that replacement re-crashing as the same in-flight remediation, which
+	// defeats the guard's entire purpose. sync.Map is used rather than a
+	// mutex+map because this access pattern — many concurrent presence
+	// checks (LoadOrStore) per reconcile, comparatively rare writes, keys
+	// that come and go rather than accumulate — is exactly what sync.Map is
+	// documented to optimize for, and it needs no separate lock to get
+	// right under concurrent reconciles (controller-runtime runs
+	// MaxConcurrentReconciles workers by default).
+	inFlight sync.Map // key: string ("namespace/deployment"), value: struct{}
+}
+
+// inFlightKey builds the guard key for a namespace/Deployment pair.
+func inFlightKey(namespace, ownerDeployment string) string {
+	return namespace + "/" + ownerDeployment
+}
+
+// tryStartRemediation marks (namespace, ownerDeployment) as in-flight if it
+// is not already. It reports false if remediation is already in progress
+// for this Deployment, in which case the caller must skip and not act.
+func (r *PodReconciler) tryStartRemediation(namespace, ownerDeployment string) bool {
+	_, alreadyInFlight := r.inFlight.LoadOrStore(inFlightKey(namespace, ownerDeployment), struct{}{})
+	return !alreadyInFlight
+}
+
+// finishRemediation clears the in-flight marker for (namespace,
+// ownerDeployment). Must be called exactly once per successful
+// tryStartRemediation, on every exit path — success, rollback, or error —
+// or the guard leaks and permanently blocks future remediation for that
+// Deployment.
+func (r *PodReconciler) finishRemediation(namespace, ownerDeployment string) {
+	r.inFlight.Delete(inFlightKey(namespace, ownerDeployment))
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
@@ -55,8 +92,29 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 
 			logger.Info("DETECTED CrashLoopBackOff", "event", event)
-			// TODO: once Owner 2's safety layer exists, replace this log
-			// line with: owner2.Remediate(ctx, event)
+
+			if !r.tryStartRemediation(event.Namespace, event.OwnerDeployment) {
+				logger.Info("remediation already in flight for this deployment, skipping",
+					"namespace", event.Namespace, "deployment", event.OwnerDeployment)
+				break
+			}
+			// TODO(Task 4 — blocked on Owner 2's Remediate() landing in the
+			// repo): replace this placeholder with the real call, e.g.:
+			//
+			//   go func() {
+			//       defer r.finishRemediation(event.Namespace, event.OwnerDeployment)
+			//       owner2.Remediate(ctx, event)
+			//   }()
+			//
+			// Whether that call should run synchronously inside Reconcile
+			// (blocking this worker for up to InitialReadinessTimeout +
+			// StabilityWindow) or be dispatched async as sketched above is a
+			// coordination question for Ananya, not something to decide
+			// unilaterally here — see the Task 3/4 notes in the walkthrough.
+			// For now there is nothing to hold the guard open for, so it is
+			// released immediately to avoid leaking a permanently-blocked
+			// entry.
+			r.finishRemediation(event.Namespace, event.OwnerDeployment)
 			break
 		}
 	}
@@ -69,9 +127,15 @@ func (r *PodReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// Owner-reference Kind values, shared with tests in this package.
+const (
+	kindReplicaSet = "ReplicaSet"
+	kindDeployment = "Deployment"
+)
+
 func (r *PodReconciler) ownerDeploymentName(ctx context.Context, pod *corev1.Pod) (string, error) {
 	for _, ref := range pod.OwnerReferences {
-		if ref.Kind != "ReplicaSet" {
+		if ref.Kind != kindReplicaSet {
 			continue
 		}
 		var rs appsv1.ReplicaSet
@@ -79,7 +143,7 @@ func (r *PodReconciler) ownerDeploymentName(ctx context.Context, pod *corev1.Pod
 			return "", err
 		}
 		for _, rsRef := range rs.OwnerReferences {
-			if rsRef.Kind == "Deployment" {
+			if rsRef.Kind == kindDeployment {
 				return rsRef.Name, nil
 			}
 		}
