@@ -1,0 +1,37 @@
+# rollout-fixable-demo — recoverable only by `rollout_undo`, not by `restart_pod`.
+#
+# Revision 1 (apply this first, let it go Ready, THEN move to revision 2):
+#   command: ["sh", "-c", "sleep 3600"]   — runs indefinitely, known-good.
+#
+# Revision 2 (this file, as committed): patches the command to something that
+# starts and exits with error — same image, same everything else, only the
+# command changes. A bad *image tag* would produce ImagePullBackOff, which our
+# detector does not watch for, so the break must be a command change.
+#
+# Deploy sequence to reproduce the demo from scratch:
+#   kubectl apply -f rollout-fixable.yaml   (with the "sleep 3600" command below)
+#   kubectl rollout status deployment/rollout-fixable-demo
+#   kubectl set env deployment/rollout-fixable-demo REV=2 --overwrite   # forces a template diff
+#   kubectl patch deployment rollout-fixable-demo --type=json -p \
+#     '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","sleep 1; exit 1"]}]'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-fixable-demo
+  labels:
+    app: rollout-fixable-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2 # keep exactly 2 revisions so rollout_undo always has rev 1 to target
+  selector:
+    matchLabels:
+      app: rollout-fixable-demo
+  template:
+    metadata:
+      labels:
+        app: rollout-fixable-demo
+    spec:
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "sleep 1; exit 1"] # revision 2 (bad) — current state of this file

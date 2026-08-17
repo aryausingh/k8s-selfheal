@@ -1,0 +1,35 @@
+# rollout-unrecoverable-demo — neither restart_pod nor rollout_undo ever
+# produces a healthy pod here. Both revisions are broken (different, equally
+# broken commands, so revision 2 is a genuine template diff from revision 1,
+# not a no-op rollout). Exists to prove the snapshot-restore rollback path
+# actually fires under real conditions — the rollback-rate metric needs at
+# least one Deployment where automation is expected to fail before recovery.
+#
+# Deploy sequence:
+#   kubectl apply -f rollout-unrecoverable.yaml   (with command A below as rev 1)
+#   kubectl rollout status ... will NOT succeed — that's expected, rev 1 is
+#     already broken. Give it long enough to accumulate restarts into
+#     CrashLoopBackOff, then move to revision 2:
+#   kubectl patch deployment rollout-unrecoverable-demo --type=json -p \
+#     '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","echo bad-2; exit 1"]}]'
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: rollout-unrecoverable-demo
+  labels:
+    app: rollout-unrecoverable-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: rollout-unrecoverable-demo
+  template:
+    metadata:
+      labels:
+        app: rollout-unrecoverable-demo
+    spec:
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command: ["sh", "-c", "echo bad-2; exit 1"] # revision 2 (bad, different failure than rev 1)
