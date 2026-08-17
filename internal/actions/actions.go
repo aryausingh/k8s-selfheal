@@ -3,7 +3,7 @@ package actions
 import (
 	"context"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -72,7 +72,7 @@ func RolloutUndo(ctx context.Context, c client.Client, event contracts.Detection
 		return fmt.Errorf("rollout undo: no prior revision available")
 	}
 
-	sort.Slice(prior, func(i, j int) bool { return prior[i].revision > prior[j].revision })
+	slices.SortFunc(prior, func(a, b candidate) int { return b.revision - a.revision })
 	target := prior[0].rs
 
 	deploy.Spec.Template = target.Spec.Template
