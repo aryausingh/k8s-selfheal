@@ -98,6 +98,18 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment)
 				break
 			}
+			// TODO(Task 6 — blocked on Subhashini's classifier package
+			// landing in the repo): the gate itself is implemented and
+			// tested (ShouldEscalate, escalation.go); only the call that
+			// produces its inputs is missing. Once her package lands:
+			//
+			//   proposal, err := classifier.Classify(ctx, event)
+			//   if ShouldEscalate(proposal.SafeForAutomation, err) {
+			//       // record/escalate for human review, do not remediate
+			//       r.finishRemediation(event.Namespace, event.OwnerDeployment)
+			//       break
+			//   }
+			//
 			// TODO(Task 4 — blocked on Owner 2's Remediate() landing in the
 			// repo): replace this placeholder with the real call, e.g.:
 			//
