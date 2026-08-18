@@ -20,6 +20,14 @@ type PodReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
+	// ManagerCtx is the manager-lifetime context (from ctrl.SetupSignalHandler
+	// in cmd/main.go), not Reconcile's own ctx. Remediation dispatched into a
+	// goroutine (Task 4) must be called with this context — Reconcile's ctx
+	// is cancelled the moment that single reconcile returns, which would cut
+	// off a still-running remediation (up to ~90s: readiness + stability
+	// window) almost immediately.
+	ManagerCtx context.Context
+
 	// inFlight tracks Deployments currently undergoing remediation, keyed by
 	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
 	// deletes the crash-looping pod and the ReplicaSet controller creates a
@@ -115,7 +123,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			//
 			//   go func() {
 			//       defer r.finishRemediation(event.Namespace, event.OwnerDeployment)
-			//       owner2.Remediate(ctx, event)
+			//       outcome, err := service.Remediate(r.ManagerCtx, event)
+			//       ...
 			//   }()
 			//
 			// Whether that call should run synchronously inside Reconcile

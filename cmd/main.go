@@ -176,10 +176,19 @@ func main() {
 		os.Exit(1)
 	}
 
+	// signalCtx lives for the whole manager lifetime (cancelled only on
+	// SIGTERM/SIGINT), unlike a Reconcile call's ctx which is cancelled the
+	// moment that single reconcile returns. Remediation dispatched into a
+	// goroutine from Reconcile (Task 4 — blocked on Owner 2's Remediate()
+	// landing) must run against this context, not the short-lived one, or
+	// it gets cancelled mid-remediation the instant Reconcile returns.
+	signalCtx := ctrl.SetupSignalHandler()
+
 	// +kubebuilder:scaffold:builder
 	if err = (&controller.PodReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
+		Client:     mgr.GetClient(),
+		Scheme:     mgr.GetScheme(),
+		ManagerCtx: signalCtx,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
@@ -195,7 +204,7 @@ func main() {
 	}
 
 	setupLog.Info("Starting manager")
-	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
+	if err := mgr.Start(signalCtx); err != nil {
 		setupLog.Error(err, "Failed to run manager")
 		os.Exit(1)
 	}
