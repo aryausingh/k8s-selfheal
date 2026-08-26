@@ -8,12 +8,15 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/aryausingh/k8s-selfheal/internal/contracts"
 )
 
 const revisionAnnotation = "deployment.kubernetes.io/revision"
+
+const kindDeployment = "Deployment"
 
 // RestartPod deletes the crash-looping pod. The Deployment's ReplicaSet
 // controller — built into Kubernetes, not your code — notices a missing
@@ -58,6 +61,14 @@ func RolloutUndo(ctx context.Context, c client.Client, event contracts.Detection
 	}
 	var prior []candidate
 	for _, rs := range rsList.Items {
+		// Matching labels alone aren't enough to prove this ReplicaSet
+		// belongs to the target Deployment — an unrelated Deployment could
+		// share the same selector labels. Require this Deployment to be
+		// the ReplicaSet's controller, not just a label match.
+		owner := metav1.GetControllerOf(&rs)
+		if owner == nil || owner.Kind != kindDeployment || owner.UID != deploy.UID {
+			continue
+		}
 		revStr, ok := rs.Annotations[revisionAnnotation]
 		if !ok {
 			continue

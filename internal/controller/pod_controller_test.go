@@ -197,17 +197,17 @@ func TestReconcile_MultiContainerLoop_DetectsNonFirstContainer(t *testing.T) {
 	// Sidecar (index 0) is healthy; the actual app container (index 1) is
 	// crash-looping. If Reconcile only inspected ContainerStatuses[0], as a
 	// naive implementation might, this would be missed entirely.
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{Name: "multi", Namespace: testNamespace},
-		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{
-			runningContainerStatus("sidecar"),
-			crashingContainerStatus("app", 7),
-		}},
-	}
-	r := &PodReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()}
+	//
+	// Deployment-owned (via ownedPod) rather than a bare pod: since
+	// resolution failure/empty now skips remediation before the guard
+	// (Reconcile stops rather than proceeding with an empty
+	// OwnerDeployment), a bare pod here would never reach the detection
+	// log this test is asserting on.
+	deploy, rs, pod := ownedPod(runningContainerStatus("sidecar"), crashingContainerStatus("app", 7))
+	r := &PodReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build()}
 	ctx, sink := newTestContext()
 
-	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "multi"}})
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}})
 
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
@@ -243,6 +243,60 @@ func TestReconcile_ResolvesOwnerDeployment(t *testing.T) {
 	}
 	if ev.PodName != testPodName || ev.Namespace != testNamespace {
 		t.Errorf("unexpected PodName/Namespace on event: %+v", ev)
+	}
+}
+
+func TestReconcile_OwnerResolutionEmpty_SkipsRemediation(t *testing.T) {
+	// A crash-looping pod with no ReplicaSet owner reference at all —
+	// ownerDeploymentName returns ("", nil), not an error. Reconcile must
+	// stop here rather than proceed to the guard with an empty
+	// OwnerDeployment (which would collude every ownerless pod in the
+	// namespace onto the same "namespace/" guard key).
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "bare", Namespace: testNamespace},
+		Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{crashingContainerStatus("main", 3)}},
+	}
+	r := &PodReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()}
+	ctx, sink := newTestContext()
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "bare"}})
+
+	if err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+	if sink.has(detectedMsg) {
+		t.Error("expected no detection/remediation when owner resolution returns empty")
+	}
+	if _, inFlight := r.inFlight.Load(inFlightKey(testNamespace, "")); inFlight {
+		t.Error("guard must never be acquired on an empty OwnerDeployment key")
+	}
+}
+
+func TestReconcile_OwnerResolutionErrors_SkipsRemediation(t *testing.T) {
+	// Owner reference points at a ReplicaSet that doesn't exist (e.g.
+	// deleted between the pod update and this reconcile) — ownerDeploymentName
+	// returns a real error. Reconcile must stop before acquiring the guard,
+	// not proceed with a zero-value OwnerDeployment.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testPodName, Namespace: testNamespace,
+			OwnerReferences: []metav1.OwnerReference{{Kind: kindReplicaSet, Name: "missing-rs", Controller: boolPtr(true)}},
+		},
+		Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{crashingContainerStatus("main", 3)}},
+	}
+	r := &PodReconciler{Client: fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build()}
+	ctx, sink := newTestContext()
+
+	_, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}})
+
+	if err != nil {
+		t.Fatalf("expected Reconcile to swallow the resolution error, got %v", err)
+	}
+	if !sink.has("could not resolve owner deployment") {
+		t.Error("expected the resolution error to be logged")
+	}
+	if sink.has(detectedMsg) {
+		t.Error("expected no detection/remediation when owner resolution errors")
 	}
 }
 
