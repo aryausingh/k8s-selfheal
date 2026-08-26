@@ -87,7 +87,12 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if cs.State.Waiting != nil && cs.State.Waiting.Reason == "CrashLoopBackOff" {
 			deploymentName, err := r.ownerDeploymentName(ctx, &pod)
 			if err != nil {
-				logger.Error(err, "could not resolve owner deployment", "pod", pod.Name)
+				logger.Error(err, "could not resolve owner deployment, skipping remediation", "pod", pod.Name)
+				break
+			}
+			if deploymentName == "" {
+				logger.Info("no owner deployment resolved, skipping remediation", "pod", pod.Name)
+				break
 			}
 
 			event := contracts.DetectionEvent{
