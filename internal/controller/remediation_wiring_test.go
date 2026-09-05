@@ -2,10 +2,13 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -253,6 +256,106 @@ func TestReconcile_RemediationFailure_StillReleasesGuard(t *testing.T) {
 	// deferred) — otherwise this Deployment would be permanently stuck
 	// in-flight after any single failed remediation.
 	waitForGuardCleared(t, r)
+}
+
+// --- evidence reaches the classifier -------------------------------------
+
+// capturingClassifier records the IncidentInput it was handed, so a test can
+// assert on the evidence Reconcile assembled rather than only on the decision
+// that came out the other end.
+type capturingClassifier struct {
+	mu      sync.Mutex
+	input   classifier.IncidentInput
+	outcome classifier.ClassificationOutcome
+}
+
+func (c *capturingClassifier) ClassifyIncident(_ context.Context, input classifier.IncidentInput) classifier.ClassificationOutcome {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.input = input
+	return c.outcome
+}
+
+func (c *capturingClassifier) captured() classifier.IncidentInput {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.input
+}
+
+func TestReconcile_PassesCollectedEvidenceToTheClassifier(t *testing.T) {
+	// The gap this closes: without Logs/Events populated, the semantic guard
+	// rejects every sub-cause but "unknown" and nothing is ever remediated.
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	spy := &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: spy,
+		Evidence: collectorWith(
+			&stubLogFetcher{previous: "dial tcp 10.0.0.5:5432: connect: connection refused"},
+			&stubEventLister{byObject: map[string][]corev1.Event{
+				testDeploymentName: {testEvent("e1", "ScalingReplicaSet", "Scaled up replica set "+testReplicaSetName+" to 1", testDeploymentName, 10*time.Second)},
+			}},
+		),
+	}
+	ctx, sink := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	got := spy.captured()
+	if !strings.Contains(got.Logs, "connection refused") {
+		t.Errorf("classifier received Logs = %q, want the collected crash log", got.Logs)
+	}
+	if len(got.Events) == 0 || !strings.Contains(strings.Join(got.Events, "\n"), "Scaled up replica set") {
+		t.Errorf("classifier received Events = %v, want the collected rollout evidence", got.Events)
+	}
+	if !sink.has("Collected incident evidence") {
+		t.Error("evidence collection should be observable in the logs")
+	}
+	waitForGuardCleared(t, r)
+}
+
+// --- ownerless pods ------------------------------------------------------
+
+func TestReconcile_NoOwnerDeployment_EscalatesWithoutTakingTheGuard(t *testing.T) {
+	// Every downstream stage needs the Deployment: Remediate() rejects an
+	// event without one, rollback has nothing to snapshot, and the guard key
+	// would collapse to "namespace/" for every ownerless pod in the namespace.
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "bare", Namespace: testNamespace},
+		Status:     corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{crashingContainerStatus("main", 4)}},
+	}
+	action := &stubRemediationAction{name: classifier.ActionRestartPod, called: make(chan contracts.DetectionEvent, 1)}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(pod).Build(),
+		ManagerCtx: context.Background(),
+		// Would automate if it got that far — proving the ownerless check,
+		// not a passive absence of any decision.
+		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:    map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
+		Snapshots:  stubSnapshotStore{},
+		Verifier:   stubVerifier{recovered: true},
+		Audit:      &stubAuditWriter{},
+		Clock:      safety.RealClock{},
+	}
+	ctx, sink := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: "bare"}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	if !sink.has("ESCALATED — no owner Deployment resolved") {
+		t.Error("expected an ownerless pod to escalate")
+	}
+	if _, taken := r.inFlight.Load(inFlightKey(testNamespace, "")); taken {
+		t.Error("the guard must not be taken for an ownerless pod — the empty key would block every other ownerless pod in the namespace")
+	}
+	select {
+	case <-action.called:
+		t.Error("no remediation may be dispatched for a pod with no owning Deployment")
+	case <-time.After(100 * time.Millisecond):
+	}
 }
 
 var errExecuteFailed = &stubExecuteError{"stub action execution failed"}

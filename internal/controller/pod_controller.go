@@ -44,6 +44,13 @@ type PodReconciler struct {
 	// action to run (confirmed with Ananya).
 	Actions map[string]safety.RemediationAction
 
+	// Evidence collects the pod logs and Kubernetes Events that populate
+	// classifier.IncidentInput. Without it every sub-cause except "unknown"
+	// fails Subhashini's semantic guard and the pipeline escalates every
+	// incident, so a nil Evidence is a functioning but permanently
+	// escalate-only controller — safe, just useless. See evidence.go.
+	Evidence *EvidenceCollector
+
 	// Snapshots, Verifier, Audit, and Clock are Owner 2's Service
 	// dependencies. They're shared across calls because none of them hold
 	// per-remediation mutable state; a fresh *safety.Service is built per
@@ -92,7 +99,8 @@ func (r *PodReconciler) finishRemediation(namespace, ownerDeployment string) {
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
@@ -127,6 +135,20 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 			logger.Info("DETECTED CrashLoopBackOff", "event", event)
 
+			// Every downstream stage needs the owning Deployment: the
+			// in-flight guard is keyed on it (an empty name would collide
+			// across every ownerless pod in the namespace), Ananya's
+			// Remediate() rejects an event without one, her snapshot/restore
+			// rollback has nothing to capture, and her verifier has no
+			// Deployment to resolve the replacement pod from. A bare pod is
+			// therefore out of scope, not a failure — escalate and stop
+			// before taking the guard.
+			if event.OwnerDeployment == "" {
+				logger.Info("ESCALATED — no owner Deployment resolved, cannot snapshot or roll back",
+					"namespace", event.Namespace, "pod", event.PodName)
+				break
+			}
+
 			if !r.tryStartRemediation(event.Namespace, event.OwnerDeployment) {
 				logger.Info("remediation already in flight for this deployment, skipping",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment)
@@ -140,16 +162,20 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				break
 			}
 
-			// Task 6: classify, then gate on safe_for_automation.
+			// Task 6: collect evidence, classify, then gate on
+			// safe_for_automation.
 			//
-			// Logs/Events are left empty here — this controller doesn't collect
-			// pod logs or Kubernetes Events yet (that needs pods/log RBAC plus
-			// an Events watch, neither of which exist in this repo). That's a
-			// known, deliberate gap, not an oversight: Subhashini's semantic
-			// guard requires supporting evidence for every sub-cause except
-			// "unknown", so with no evidence the classifier always falls back
-			// to escalate_to_human instead of guessing — the fail-safe
-			// direction. Wiring real evidence collection is follow-up work.
+			// The DetectionEvent says a container is crash-looping; the logs
+			// and Events say why, and "why" is what the classifier actually
+			// classifies. Collection is best-effort by design (see
+			// evidence.go): when it comes back empty, the semantic guard
+			// rejects every sub-cause but "unknown" and the incident
+			// escalates — the fail-safe direction — rather than the
+			// classifier guessing from a restart count alone.
+			logs, events := r.Evidence.Collect(ctx, &pod, event.ContainerName, event.OwnerDeployment)
+			logger.Info("Collected incident evidence",
+				"pod", event.PodName, "logBytes", len(logs), "eventCount", len(events))
+
 			incident := classifier.IncidentInput{
 				DetectionEvent: classifier.DetectionEvent{
 					PodName:         event.PodName,
@@ -159,6 +185,8 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					OwnerDeployment: event.OwnerDeployment,
 					Timestamp:       event.Timestamp,
 				},
+				Logs:   logs,
+				Events: events,
 			}
 			classification := r.Classifier.ClassifyIncident(ctx, incident)
 			proposal := classification.Proposal

@@ -29,6 +29,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -183,7 +184,9 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -226,12 +229,28 @@ func main() {
 		setupLog.Info("classifier configured")
 	}
 
+	// A typed clientset purely for pod logs: pods/log is a byte-streaming
+	// subresource, which mgr.GetClient() cannot read at all (see evidence.go).
+	logClientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "Failed to build clientset for pod log collection")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 	if err = (&controller.PodReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		ManagerCtx: signalCtx,
 		Classifier: classifier.NewClassificationService(rawClassifier, 0),
+		Evidence: &controller.EvidenceCollector{
+			Logs: &controller.ClientsetLogFetcher{Client: logClientset},
+			// mgr.GetAPIReader(), not mgr.GetClient(): Events are listed with
+			// an involvedObject.name field selector, which only the API server
+			// can serve. The cached client would need a cluster-wide Event
+			// informer to answer it.
+			Events: &controller.APIReaderEventLister{Reader: mgr.GetAPIReader()},
+		},
 		Actions: map[string]safety.RemediationAction{
 			(&actions.RestartPodAction{}).Name():  &actions.RestartPodAction{Client: mgr.GetClient()},
 			(&actions.RolloutUndoAction{}).Name(): &actions.RolloutUndoAction{Client: mgr.GetClient()},
