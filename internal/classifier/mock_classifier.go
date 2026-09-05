@@ -102,6 +102,41 @@ func (MockClassifier) Classify(
 			"The application panic may require a code-level fix and is not automatically remediated.",
 		), nil
 
+	// A crash loop that began right after a rollout, with nothing above
+	// explaining it: the new revision is the suspect, so undo it. This is
+	// checked last among the identified causes because the indicator —
+	// "back-off restarting failed container" — is present on every
+	// crash-looping pod; it only means bad_deploy in combination with recent
+	// rollout evidence, and only once the more specific causes above have
+	// been ruled out.
+	//
+	// Recency is the caller's responsibility: hasRecentDeploymentEvidence is
+	// a substring match with no notion of time, so it is only as honest as
+	// the event window the collector applies
+	// (internal/controller/evidence.go).
+	case strings.Contains(evidence, "back-off restarting failed container") &&
+		hasRecentDeploymentEvidence(input):
+
+		if strings.TrimSpace(input.OwnerDeployment) == "" {
+			return escalationProposal(
+				input,
+				"bad_deploy",
+				"The crash loop began after a rollout, but the owning Deployment could not be identified.",
+			), nil
+		}
+
+		return Proposal{
+			SubCause:          "bad_deploy",
+			RecommendedAction: ActionRolloutUndo,
+			Target: Target{
+				Kind:      "Deployment",
+				Namespace: input.Namespace,
+				Name:      input.OwnerDeployment,
+			},
+			SafeForAutomation: true,
+			Reasoning:         "The container began crash-looping immediately after a rollout, and no other cause is supported by the evidence.",
+		}, nil
+
 	default:
 		return escalationProposal(
 			input,
