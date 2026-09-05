@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
@@ -12,7 +13,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 
+	"github.com/aryausingh/k8s-selfheal/internal/classifier"
 	"github.com/aryausingh/k8s-selfheal/internal/contracts"
+	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
 
 // PodReconciler watches core Pods and detects CrashLoopBackOff.
@@ -27,6 +30,36 @@ type PodReconciler struct {
 	// off a still-running remediation (up to ~90s: readiness + stability
 	// window) almost immediately.
 	ManagerCtx context.Context
+
+	// Classifier resolves a DetectionEvent into Subhashini's Proposal via her
+	// ClassifyIncident seam. nil is treated as a misconfiguration, not a
+	// silent no-op: Reconcile escalates by default rather than automating
+	// blind (see the nil check in Reconcile).
+	Classifier classifier.IncidentClassifier
+
+	// Actions maps a RemediationAction's Name() ("restart_pod",
+	// "rollout_undo") to the concrete action to inject into Ananya's
+	// safety.Service. Reconcile selects an entry by matching against
+	// proposal.RecommendedAction — Remediate() itself never decides which
+	// action to run (confirmed with Ananya).
+	Actions map[string]safety.RemediationAction
+
+	// Evidence collects the pod logs and Kubernetes Events that populate
+	// classifier.IncidentInput. Without it every sub-cause except "unknown"
+	// fails Subhashini's semantic guard and the pipeline escalates every
+	// incident, so a nil Evidence is a functioning but permanently
+	// escalate-only controller — safe, just useless. See evidence.go.
+	Evidence *EvidenceCollector
+
+	// Snapshots, Verifier, Audit, and Clock are Owner 2's Service
+	// dependencies. They're shared across calls because none of them hold
+	// per-remediation mutable state; a fresh *safety.Service is built per
+	// call with only Action varying, rather than mutating a shared Service
+	// mid-flight (per Ananya's review note).
+	Snapshots safety.SnapshotStore
+	Verifier  safety.PodVerifier
+	Audit     safety.AuditWriter
+	Clock     safety.Clock
 
 	// inFlight tracks Deployments currently undergoing remediation, keyed by
 	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
@@ -66,7 +99,8 @@ func (r *PodReconciler) finishRemediation(namespace, ownerDeployment string) {
 }
 
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
-// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
+// +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
 // +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
@@ -101,41 +135,123 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 			logger.Info("DETECTED CrashLoopBackOff", "event", event)
 
+			// Every downstream stage needs the owning Deployment: the
+			// in-flight guard is keyed on it (an empty name would collide
+			// across every ownerless pod in the namespace), Ananya's
+			// Remediate() rejects an event without one, her snapshot/restore
+			// rollback has nothing to capture, and her verifier has no
+			// Deployment to resolve the replacement pod from. A bare pod is
+			// therefore out of scope, not a failure — escalate and stop
+			// before taking the guard.
+			if event.OwnerDeployment == "" {
+				logger.Info("ESCALATED — no owner Deployment resolved, cannot snapshot or roll back",
+					"namespace", event.Namespace, "pod", event.PodName)
+				break
+			}
+
 			if !r.tryStartRemediation(event.Namespace, event.OwnerDeployment) {
 				logger.Info("remediation already in flight for this deployment, skipping",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment)
 				break
 			}
-			// TODO(Task 6 — blocked on Subhashini's classifier package
-			// landing in the repo): the gate itself is implemented and
-			// tested (ShouldEscalate, escalation.go); only the call that
-			// produces its inputs is missing. Once her package lands:
+			if r.Classifier == nil {
+				logger.Error(fmt.Errorf("PodReconciler.Classifier is not configured"),
+					"cannot classify incident — escalating by default rather than automating blind",
+					"namespace", event.Namespace, "pod", event.PodName)
+				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				break
+			}
+
+			// Task 6: collect evidence, classify, then gate on
+			// safe_for_automation.
 			//
-			//   proposal, err := classifier.Classify(ctx, event)
-			//   if ShouldEscalate(proposal.SafeForAutomation, err) {
-			//       // record/escalate for human review, do not remediate
-			//       r.finishRemediation(event.Namespace, event.OwnerDeployment)
-			//       break
-			//   }
-			//
-			// TODO(Task 4 — blocked on Owner 2's Remediate() landing in the
-			// repo): replace this placeholder with the real call, e.g.:
-			//
-			//   go func() {
-			//       defer r.finishRemediation(event.Namespace, event.OwnerDeployment)
-			//       outcome, err := service.Remediate(r.ManagerCtx, event)
-			//       ...
-			//   }()
-			//
-			// Whether that call should run synchronously inside Reconcile
-			// (blocking this worker for up to InitialReadinessTimeout +
-			// StabilityWindow) or be dispatched async as sketched above is a
-			// coordination question for Ananya, not something to decide
-			// unilaterally here — see the Task 3/4 notes in the walkthrough.
-			// For now there is nothing to hold the guard open for, so it is
-			// released immediately to avoid leaking a permanently-blocked
-			// entry.
-			r.finishRemediation(event.Namespace, event.OwnerDeployment)
+			// The DetectionEvent says a container is crash-looping; the logs
+			// and Events say why, and "why" is what the classifier actually
+			// classifies. Collection is best-effort by design (see
+			// evidence.go): when it comes back empty, the semantic guard
+			// rejects every sub-cause but "unknown" and the incident
+			// escalates — the fail-safe direction — rather than the
+			// classifier guessing from a restart count alone.
+			logs, events := r.Evidence.Collect(ctx, &pod, event.ContainerName, event.OwnerDeployment)
+			logger.Info("Collected incident evidence",
+				"pod", event.PodName, "logBytes", len(logs), "eventCount", len(events))
+
+			incident := classifier.IncidentInput{
+				DetectionEvent: classifier.DetectionEvent{
+					PodName:         event.PodName,
+					Namespace:       event.Namespace,
+					ContainerName:   event.ContainerName,
+					RestartCount:    event.RestartCount,
+					OwnerDeployment: event.OwnerDeployment,
+					Timestamp:       event.Timestamp,
+				},
+				Logs:   logs,
+				Events: events,
+			}
+			classification := r.Classifier.ClassifyIncident(ctx, incident)
+			proposal := classification.Proposal
+
+			// classifyErr is always nil at this call site: ClassifyIncident
+			// never returns an error — a failed or invalid classification is
+			// already converted into a safe escalate_to_human Proposal
+			// internally (classification.FallbackUsed records that this
+			// happened). ShouldEscalate's classifyErr parameter models a
+			// transport-style failure this API doesn't expose; it stays in
+			// the signature in case a future classifier implementation does.
+			if ShouldEscalate(proposal.SafeForAutomation, nil) {
+				logger.Info("ESCALATED — not safe for automation",
+					"namespace", event.Namespace, "pod", event.PodName,
+					"subCause", proposal.SubCause,
+					"recommendedAction", proposal.RecommendedAction,
+					"reasoning", proposal.Reasoning,
+					"fallbackUsed", classification.FallbackUsed,
+					"fallbackReason", classification.FallbackReason)
+				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				break
+			}
+
+			// Task 4: resolve which RemediationAction the proposal selected.
+			// Arya picks the action and injects it into a per-call Service —
+			// Remediate() itself never decides which action to run — matching
+			// proposal.RecommendedAction against each action's Name().
+			action, ok := r.Actions[proposal.RecommendedAction]
+			if !ok {
+				logger.Error(fmt.Errorf("no remediation action registered for %q", proposal.RecommendedAction),
+					"classifier recommended an action with no matching implementation — escalating instead",
+					"namespace", event.Namespace, "pod", event.PodName)
+				r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				break
+			}
+
+			service := &safety.Service{
+				Snapshots: r.Snapshots,
+				Verifier:  r.Verifier,
+				Action:    action,
+				Audit:     r.Audit,
+				Clock:     r.Clock,
+			}
+
+			// Dispatched into a goroutine against ManagerCtx, not this
+			// Reconcile call's ctx: Remediate() can run up to ~90s (30s
+			// readiness + 60s stability window, per Ananya's verifier
+			// constants), and Reconcile's ctx is cancelled the instant this
+			// call returns — that would cut a still-running remediation off
+			// almost immediately. The guard is released via defer inside the
+			// goroutine so it stays held for the whole Remediate() lifetime,
+			// per Ananya's review note, not released early as before.
+			go func() {
+				defer r.finishRemediation(event.Namespace, event.OwnerDeployment)
+				outcome, err := service.Remediate(r.ManagerCtx, event)
+				if err != nil {
+					logger.Error(err, "remediation failed",
+						"namespace", event.Namespace, "deployment", event.OwnerDeployment,
+						"action", action.Name())
+					return
+				}
+				logger.Info("remediation finished",
+					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
+					"action", action.Name(), "result", outcome.Result, "mttr", outcome.MTTR)
+			}()
 			break
 		}
 	}

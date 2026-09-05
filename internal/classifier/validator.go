@@ -331,6 +331,19 @@ func validateSemanticConsistency(
 		}
 
 	case "bad_deploy":
+		// The image-pull indicators below cannot co-occur with the only
+		// failure this system detects. A pod that cannot pull its image never
+		// reaches CrashLoopBackOff — it sits in ImagePullBackOff, which the
+		// detector does not watch — so before "back-off restarting failed
+		// container" was added here, bad_deploy was unsatisfiable in practice
+		// and rollout_undo could never fire.
+		//
+		// That indicator alone is weak: every crash-looping pod produces it.
+		// It is the hasRecentDeploymentEvidence check immediately below that
+		// makes this discriminating — the crash must also coincide with a
+		// rollout — and the caller is responsible for only supplying
+		// genuinely recent events, since the check itself has no notion of
+		// time (internal/controller/evidence.go enforces that window).
 		if !containsAny(
 			evidence,
 			"imagepullbackoff",
@@ -338,6 +351,7 @@ func validateSemanticConsistency(
 			"invalid image",
 			"invalid-version",
 			"back-off pulling image",
+			"back-off restarting failed container",
 		) {
 			return semanticConsistencyFailure{
 				reasonCode: ReasonCodeSemanticGuardRejected,

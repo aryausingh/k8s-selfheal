@@ -19,7 +19,9 @@ package main
 import (
 	"crypto/tls"
 	"flag"
+	"fmt"
 	"os"
+	"strings"
 
 	// Import all Kubernetes client auth plugins (e.g. Azure, GCP, OIDC, etc.)
 	// to ensure that exec-entrypoint and run can make use of them.
@@ -27,6 +29,7 @@ import (
 
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/client-go/kubernetes"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
@@ -36,8 +39,37 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
 
 	// +kubebuilder:scaffold:imports
+	"github.com/aryausingh/k8s-selfheal/internal/actions"
+	"github.com/aryausingh/k8s-selfheal/internal/classifier"
 	"github.com/aryausingh/k8s-selfheal/internal/controller"
+	"github.com/aryausingh/k8s-selfheal/internal/safety"
 )
+
+// classifierProviderEnv selects which classifier.Classifier backs the
+// controller's classification calls. Defaults to the mock classifier
+// (deterministic, no external API calls) when unset, so a plain `make run`
+// against kind-selfheal never silently reaches out to a real LLM provider.
+const classifierProviderEnv = "CLASSIFIER_PROVIDER"
+
+// newClassifier selects a classifier.Classifier implementation from
+// CLASSIFIER_PROVIDER. This is Owner 1's wiring choice, not Subhashini's —
+// her package only exports the constructors (NewClaudeClassifier,
+// NewMistralClassifier) and MockClassifier; picking between them at startup
+// is glue code, same as selecting restart_pod vs rollout_undo at the
+// Reconcile call site.
+func newClassifier() (classifier.Classifier, error) {
+	switch provider := strings.ToLower(strings.TrimSpace(os.Getenv(classifierProviderEnv))); provider {
+	case "", classifier.ProviderMock:
+		return classifier.MockClassifier{}, nil
+	case classifier.ProviderClaude:
+		return classifier.NewClaudeClassifier()
+	case classifier.ProviderMistral:
+		return classifier.NewMistralClassifier()
+	default:
+		return nil, fmt.Errorf("unknown %s %q (want %q, %q, or %q)",
+			classifierProviderEnv, provider, classifier.ProviderMock, classifier.ProviderClaude, classifier.ProviderMistral)
+	}
+}
 
 var (
 	scheme   = runtime.NewScheme()
@@ -152,7 +184,9 @@ func main() {
 		metricsServerOptions.KeyName = metricsCertKey
 	}
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	restConfig := ctrl.GetConfigOrDie()
+
+	mgr, err := ctrl.NewManager(restConfig, ctrl.Options{
 		Scheme:                 scheme,
 		Metrics:                metricsServerOptions,
 		WebhookServer:          webhookServer,
@@ -184,11 +218,51 @@ func main() {
 	// it gets cancelled mid-remediation the instant Reconcile returns.
 	signalCtx := ctrl.SetupSignalHandler()
 
+	rawClassifier, err := newClassifier()
+	if err != nil {
+		setupLog.Error(err, "failed to initialize classifier")
+		os.Exit(1)
+	}
+	if metadata, ok := rawClassifier.(classifier.ClassifierMetadata); ok {
+		setupLog.Info("classifier configured", "provider", metadata.ProviderName(), "model", metadata.ModelName())
+	} else {
+		setupLog.Info("classifier configured")
+	}
+
+	// A typed clientset purely for pod logs: pods/log is a byte-streaming
+	// subresource, which mgr.GetClient() cannot read at all (see evidence.go).
+	logClientset, err := kubernetes.NewForConfig(restConfig)
+	if err != nil {
+		setupLog.Error(err, "Failed to build clientset for pod log collection")
+		os.Exit(1)
+	}
+
 	// +kubebuilder:scaffold:builder
 	if err = (&controller.PodReconciler{
 		Client:     mgr.GetClient(),
 		Scheme:     mgr.GetScheme(),
 		ManagerCtx: signalCtx,
+		Classifier: classifier.NewClassificationService(rawClassifier, 0),
+		Evidence: &controller.EvidenceCollector{
+			Logs: &controller.ClientsetLogFetcher{Client: logClientset},
+			// mgr.GetAPIReader(), not mgr.GetClient(): Events are listed with
+			// an involvedObject.name field selector, which only the API server
+			// can serve. The cached client would need a cluster-wide Event
+			// informer to answer it.
+			Events: &controller.APIReaderEventLister{Reader: mgr.GetAPIReader()},
+		},
+		Actions: map[string]safety.RemediationAction{
+			(&actions.RestartPodAction{}).Name():  &actions.RestartPodAction{Client: mgr.GetClient()},
+			(&actions.RolloutUndoAction{}).Name(): &actions.RolloutUndoAction{Client: mgr.GetClient()},
+		},
+		Snapshots: &safety.KubernetesSnapshotStore{Client: mgr.GetClient()},
+		Verifier:  safety.NewVerifier(mgr.GetClient()),
+		// Audit goes to stdout for now — there's no dedicated audit sink yet
+		// (that's Owner 3's Grafana/reporting track). This is an interim
+		// choice worth confirming once that track lands, not a frozen
+		// contract like the others above.
+		Audit: safety.NewJSONLAuditWriter(os.Stdout),
+		Clock: safety.RealClock{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)

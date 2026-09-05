@@ -1,0 +1,72 @@
+# transient-recovers-demo — the happy path: restart_pod actually RECOVERS.
+#
+# This is the only scenario in this directory that reaches OutcomeRecovered,
+# so it is the one that proves the verifier's readiness + 60s stability window
+# passes under real conditions rather than only in unit tests.
+#
+# How the transience is simulated deterministically:
+#   The container remembers, on the node's filesystem, the name of the FIRST
+#   pod that ever ran. That pod always fails with a connection error; any
+#   later pod succeeds. Since restart_pod works by deleting the crash-looping
+#   pod and letting the ReplicaSet create a replacement with a new name, the
+#   replacement is the one that comes up healthy — exactly the shape of a real
+#   transient dependency failure, without depending on real timing.
+#
+#   A container *restart* inside the same pod does not clear it: the pod name
+#   is unchanged, so the pod keeps crash-looping until the operator acts. That
+#   is deliberate — otherwise the workload would self-heal before remediation
+#   ever ran and the demo would prove nothing.
+#
+# The log line is what drives classification: "connection refused" is what
+# makes the classifier propose transient_failure -> restart_pod, and what
+# satisfies the semantic guard for that sub-cause.
+#
+# IMPORTANT: the state survives on the node between runs. Reset it before
+# re-running this scenario, or the first pod will come up healthy:
+#   docker exec selfheal-control-plane rm -rf /tmp/k8s-selfheal
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transient-recovers-demo
+  labels:
+    app: transient-recovers-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: transient-recovers-demo
+  template:
+    metadata:
+      labels:
+        app: transient-recovers-demo
+    spec:
+      volumes:
+        - name: state
+          hostPath:
+            path: /tmp/k8s-selfheal/transient-recovers
+            type: DirectoryOrCreate
+      containers:
+        - name: workload
+          image: busybox:1.36
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: state
+              mountPath: /state
+          command:
+            - sh
+            - -c
+            - |
+              if [ ! -f /state/first-pod ]; then
+                echo "$POD_NAME" > /state/first-pod
+              fi
+              if [ "$POD_NAME" = "$(cat /state/first-pod)" ]; then
+                echo "dial tcp 10.96.0.99:5432: connect: connection refused"
+                exit 1
+              fi
+              echo "dependency reachable, serving"
+              sleep 3600
