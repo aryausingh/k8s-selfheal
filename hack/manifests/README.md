@@ -44,18 +44,28 @@ as a real LLM on these four workloads, and costs nothing to re-run. Set it to
 
 ```
 DETECTED CrashLoopBackOff
-Collected incident evidence   logBytes=52 eventCount=6      <- non-zero: evidence collection is live
-remediation finished          action=restart_pod result=recovered mttr=1m17s
+Collected incident evidence   logBytes=54 eventCount=10     <- non-zero: evidence collection is live
+remediation finished          action=restart_pod result=recovered mttr=1m5.12184925s
 ```
+
+Those numbers are from an actual `transient-recovers` run, not an illustration.
+`logBytes` is the one `connection refused` line; `eventCount` grows with each
+incident on the same Deployment and is capped at 25.
 
 `logBytes=0 eventCount=0` followed by `ESCALATED — not safe for automation`
 means evidence collection is not working — check the `Evidence` wiring in
 `cmd/main.go`, and RBAC if running deployed rather than via `make run`.
 
-Timing: expect roughly 90s from detection to a terminal outcome — 30s
-readiness timeout plus a 60s stability window (`internal/safety/verifier.go`).
-A `recovered` run takes the full window; a `rolled_back` run usually ends at
-the 30s readiness timeout.
+Timing is the other thing to read, because the two outcomes are
+distinguishable by MTTR alone. A `recovered` run passes readiness almost
+immediately and then sits out the full 60s stability window, landing at
+**~65s**. A `rolled_back` run gives up at the 30s readiness timeout, landing at
+**~30.0s** — near-exactly, since it is a timeout rather than a measurement.
+Both constants live in `internal/safety/verifier.go`.
+
+An MTTR of exactly 30s on a workload you expected to recover means the verifier
+never found the replacement Pod, not that the workload failed to come up. Check
+whether the replacement is Running before assuming the remediation was wrong.
 
 ---
 
