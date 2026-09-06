@@ -101,7 +101,13 @@ func (r *PodReconciler) finishRemediation(namespace, ownerDeployment string) {
 // +kubebuilder:rbac:groups="",resources=pods,verbs=get;list;watch;delete
 // +kubebuilder:rbac:groups="",resources=pods/log,verbs=get
 // +kubebuilder:rbac:groups="",resources=events,verbs=get;list;watch;create;patch
-// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list
+// replicasets needs watch, not just get;list: ownerDeploymentName and Ananya's
+// DeploymentPodResolver both read ReplicaSets through the manager's *cached*
+// client, and a cache read starts an informer, which LISTs and then WATCHes.
+// Without watch the reflector re-lists on every failed watch and logs a
+// forbidden error every few seconds, leaving the ReplicaSet cache refreshed
+// only by accident. Caught by running deployed rather than via `make run`.
+// +kubebuilder:rbac:groups=apps,resources=replicasets,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch;update;patch
 
 func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
