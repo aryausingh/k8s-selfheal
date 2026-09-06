@@ -109,10 +109,15 @@ kubectl delete -f hack/manifests/transient-unrecoverable.yaml
 
 This one needs two revisions: a good one to roll back *to*, then a bad one.
 
+The `sed` runs against the *file*, not against `kubectl -o yaml` output:
+`-o yaml` re-renders the command as an unquoted YAML list, so a pattern with
+quotes in it silently fails to match and you end up applying the broken
+revision as revision 1 — after which the patch below is a no-op and no rollout
+ever happens.
+
 ```bash
-# Revision 1 — known good. Note the inline command override.
-kubectl apply -f hack/manifests/rollout-fixable.yaml --dry-run=client -o yaml \
-  | sed 's/"sleep 1; exit 1"/"sleep 3600"/' \
+# Revision 1 — known good.
+sed 's/"sleep 1; exit 1"/"sleep 3600"/' hack/manifests/rollout-fixable.yaml \
   | kubectl apply -f -
 kubectl rollout status deployment/rollout-fixable-demo
 
@@ -136,9 +141,9 @@ kubectl delete deployment rollout-fixable-demo
 ## 4. rollout-unrecoverable — `rollout_undo` → `rolled_back`
 
 ```bash
-# Revision 1 — already broken, on purpose.
-kubectl apply -f hack/manifests/rollout-unrecoverable.yaml --dry-run=client -o yaml \
-  | sed 's/"echo bad-2; exit 1"/"echo bad-1; exit 1"/' \
+# Revision 1 — already broken, on purpose. sed the file, not -o yaml output
+# (see scenario 3 above for why).
+sed 's/"echo bad-2; exit 1"/"echo bad-1; exit 1"/' hack/manifests/rollout-unrecoverable.yaml \
   | kubectl apply -f -
 
 # Wait for CrashLoopBackOff, then roll out an equally broken revision 2.
