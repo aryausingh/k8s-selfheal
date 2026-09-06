@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -20,13 +21,13 @@ import (
 
 // --- test scaffolding -------------------------------------------------
 //
-// Reconcile has no observable side effect today beyond what it logs — the
-// real remediation call is blocked on Task 4 (Owner 2's Remediate() isn't
-// in the repo yet), so there is nothing downstream to assert against like
-// "the pod got deleted". recordingSink stands in as a controller-runtime
-// logr.LogSink that captures every Info()/Error() call, including the
-// structured key/value pairs (e.g. "event", <DetectionEvent>), so tests can
-// assert precisely on what Reconcile decided rather than just that it ran.
+// recordingSink stands in as a controller-runtime logr.LogSink that
+// captures every Info()/Error() call, including the structured key/value
+// pairs (e.g. "event", <DetectionEvent>), so tests can assert precisely on
+// what Reconcile decided rather than just that it ran. The detection-only
+// tests in this file predate Task 4/6 landing (see
+// remediation_wiring_test.go for the classify/escalate/dispatch behavior)
+// and still rely on it for that reason.
 
 type logCall struct {
 	msg   string
@@ -34,22 +35,34 @@ type logCall struct {
 	isErr bool
 }
 
+// recordingSink is shared between the synchronous logger.Info/Error calls
+// Reconcile makes directly and the goroutine it dispatches for Task 4
+// remediation, which logs its own outcome after Reconcile has already
+// returned. Those two writers run concurrently from the test's point of
+// view, so this needs a real lock, not just append-and-hope.
 type recordingSink struct {
+	mu    sync.Mutex
 	calls []logCall
 }
 
 func (s *recordingSink) Init(logr.RuntimeInfo) {}
 func (s *recordingSink) Enabled(int) bool      { return true }
 func (s *recordingSink) Info(_ int, msg string, kvs ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls = append(s.calls, logCall{msg: msg, kvs: kvs})
 }
 func (s *recordingSink) Error(_ error, msg string, kvs ...any) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.calls = append(s.calls, logCall{msg: msg, kvs: kvs, isErr: true})
 }
 func (s *recordingSink) WithValues(...any) logr.LogSink { return s }
 func (s *recordingSink) WithName(string) logr.LogSink   { return s }
 
 func (s *recordingSink) has(substr string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, c := range s.calls {
 		if strings.Contains(c.msg, substr) {
 			return true
@@ -60,6 +73,8 @@ func (s *recordingSink) has(substr string) bool {
 
 // event returns the contracts.DetectionEvent logged alongside msg, if any.
 func (s *recordingSink) event(msg string) (contracts.DetectionEvent, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	for _, c := range s.calls {
 		if c.msg != msg {
 			continue

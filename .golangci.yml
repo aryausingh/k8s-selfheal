@@ -53,6 +53,15 @@ linters:
           - dupl
           - lll
         path: internal/*
+      # Test fixtures repeat literals on purpose: a table case that spells out
+      # its own sub-cause and target kind reads correctly on its own, and
+      # hoisting those into shared constants makes every case depend on a
+      # lookup elsewhere in the file. 41 of the 50 goconst reports in this repo
+      # came from test data, drowning the handful in production code that are
+      # worth acting on.
+      - linters:
+          - goconst
+        path: _test\.go
     paths:
       - third_party$
       - builtin$

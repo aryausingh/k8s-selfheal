@@ -16,6 +16,10 @@ func (MockClassifier) ModelName() string {
 	return ProviderMock
 }
 
+// The transient_failure reasoning is shared between the automatable proposal
+// and its escalation counterpart, so the two cannot drift apart.
+const reasoningTransientFailure = "The evidence indicates a transient dependency or connectivity failure."
+
 func (MockClassifier) Classify(
 	ctx context.Context,
 	input IncidentInput,
@@ -37,7 +41,7 @@ func (MockClassifier) Classify(
 
 		return escalationProposal(
 			input,
-			"oom_adjacent",
+			SubCauseOOMAdjacent,
 			"The evidence indicates an out-of-memory termination that requires resource investigation.",
 		), nil
 
@@ -48,7 +52,7 @@ func (MockClassifier) Classify(
 
 		return escalationProposal(
 			input,
-			"bad_config",
+			SubCauseBadConfig,
 			"The failure requires a configuration change and is not safe for automatic remediation.",
 		), nil
 
@@ -59,16 +63,16 @@ func (MockClassifier) Classify(
 		if strings.TrimSpace(input.OwnerDeployment) == "" {
 			return escalationProposal(
 				input,
-				"bad_deploy",
+				SubCauseBadDeploy,
 				"A bad deployment is suspected, but the owning Deployment could not be identified.",
 			), nil
 		}
 
 		return Proposal{
-			SubCause:          "bad_deploy",
+			SubCause:          SubCauseBadDeploy,
 			RecommendedAction: ActionRolloutUndo,
 			Target: Target{
-				Kind:      "Deployment",
+				Kind:      TargetKindDeployment,
 				Namespace: input.Namespace,
 				Name:      input.OwnerDeployment,
 			},
@@ -84,28 +88,63 @@ func (MockClassifier) Classify(
 		strings.Contains(evidence, "timeout"):
 
 		return Proposal{
-			SubCause:          "transient_failure",
+			SubCause:          SubCauseTransientFailure,
 			RecommendedAction: ActionRestartPod,
 			Target: Target{
-				Kind:      "Pod",
+				Kind:      TargetKindPod,
 				Namespace: input.Namespace,
 				Name:      input.PodName,
 			},
 			SafeForAutomation: true,
-			Reasoning:         "The evidence indicates a transient dependency or connectivity failure.",
+			Reasoning:         reasoningTransientFailure,
 		}, nil
 
 	case strings.Contains(evidence, "panic"):
 		return escalationProposal(
 			input,
-			"application_panic",
+			SubCauseApplicationPanic,
 			"The application panic may require a code-level fix and is not automatically remediated.",
 		), nil
+
+	// A crash loop that began right after a rollout, with nothing above
+	// explaining it: the new revision is the suspect, so undo it. This is
+	// checked last among the identified causes because the indicator —
+	// "back-off restarting failed container" — is present on every
+	// crash-looping pod; it only means bad_deploy in combination with recent
+	// rollout evidence, and only once the more specific causes above have
+	// been ruled out.
+	//
+	// Recency is the caller's responsibility: hasRecentDeploymentEvidence is
+	// a substring match with no notion of time, so it is only as honest as
+	// the event window the collector applies
+	// (internal/controller/evidence.go).
+	case strings.Contains(evidence, "back-off restarting failed container") &&
+		hasRecentDeploymentEvidence(input):
+
+		if strings.TrimSpace(input.OwnerDeployment) == "" {
+			return escalationProposal(
+				input,
+				SubCauseBadDeploy,
+				"The crash loop began after a rollout, but the owning Deployment could not be identified.",
+			), nil
+		}
+
+		return Proposal{
+			SubCause:          SubCauseBadDeploy,
+			RecommendedAction: ActionRolloutUndo,
+			Target: Target{
+				Kind:      TargetKindDeployment,
+				Namespace: input.Namespace,
+				Name:      input.OwnerDeployment,
+			},
+			SafeForAutomation: true,
+			Reasoning:         "The container began crash-looping immediately after a rollout, and no other cause is supported by the evidence.",
+		}, nil
 
 	default:
 		return escalationProposal(
 			input,
-			"unknown",
+			SubCauseUnknown,
 			"The available logs and events do not provide enough evidence for safe automation.",
 		), nil
 	}
@@ -120,7 +159,7 @@ func escalationProposal(
 		SubCause:          subCause,
 		RecommendedAction: ActionEscalateToHuman,
 		Target: Target{
-			Kind:      "Pod",
+			Kind:      TargetKindPod,
 			Namespace: input.Namespace,
 			Name:      input.PodName,
 		},

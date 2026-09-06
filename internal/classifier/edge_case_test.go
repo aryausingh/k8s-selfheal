@@ -653,7 +653,7 @@ func TestEdgeCaseNilMistralClassifier(t *testing.T) {
 
 	if !strings.Contains(
 		err.Error(),
-		"Mistral classifier is nil",
+		"mistral classifier is nil",
 	) {
 		t.Fatalf(
 			"unexpected error: %v",
@@ -676,7 +676,7 @@ func TestEdgeCaseMistralEmptyAPIKey(t *testing.T) {
 
 	if !strings.Contains(
 		err.Error(),
-		"Mistral API key is empty",
+		"mistral API key is empty",
 	) {
 		t.Fatalf(
 			"unexpected error: %v",
@@ -699,7 +699,7 @@ func TestEdgeCaseNilClaudeClassifier(t *testing.T) {
 
 	if !strings.Contains(
 		err.Error(),
-		"Claude classifier is nil",
+		"claude classifier is nil",
 	) {
 		t.Fatalf(
 			"unexpected error: %v",
@@ -722,7 +722,7 @@ func TestEdgeCaseClaudeEmptyAPIKey(t *testing.T) {
 
 	if !strings.Contains(
 		err.Error(),
-		"Claude API key is empty",
+		"claude API key is empty",
 	) {
 		t.Fatalf(
 			"unexpected error: %v",

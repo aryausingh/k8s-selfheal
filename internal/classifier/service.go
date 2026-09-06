@@ -345,10 +345,10 @@ func buildSafeFallback(
 
 	if hasTransientFailureEvidence(input) {
 		return Proposal{
-			SubCause:          "transient_failure",
+			SubCause:          SubCauseTransientFailure,
 			RecommendedAction: ActionRestartPod,
 			Target: Target{
-				Kind:      "Pod",
+				Kind:      TargetKindPod,
 				Namespace: input.Namespace,
 				Name:      input.PodName,
 			},
@@ -358,10 +358,10 @@ func buildSafeFallback(
 	}
 
 	return Proposal{
-		SubCause:          "unknown",
+		SubCause:          SubCauseUnknown,
 		RecommendedAction: ActionEscalateToHuman,
 		Target: Target{
-			Kind:      "Pod",
+			Kind:      TargetKindPod,
 			Namespace: input.Namespace,
 			Name:      input.PodName,
 		},

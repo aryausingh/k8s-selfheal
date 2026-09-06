@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -129,7 +130,29 @@ func eligibleDeploymentPod(
 	if pod.Name == target.OriginalPod.Name {
 		return false
 	}
-	return !pod.CreationTimestamp.Time.Before(target.ActionStartedAt)
+	return !pod.CreationTimestamp.Time.Before(actionSecond(target.ActionStartedAt))
+}
+
+// actionSecond truncates the action start to the precision Kubernetes actually
+// reports Pod creation at.
+//
+// metav1.Time serializes as RFC3339 with *second* granularity, so every
+// CreationTimestamp read back from the API server has a zero sub-second part,
+// while ActionStartedAt carries full monotonic precision. Comparing them
+// directly rejects any replacement created in the same wall-clock second the
+// action started — and since RestartPod deletes a Pod and the ReplicaSet
+// controller replaces it within milliseconds, that is the normal case, not an
+// edge case. The replacement was then ineligible for the entire readiness
+// timeout, so a genuinely recovered workload was reported as rolled_back and
+// restart_pod could never reach OutcomeRecovered.
+//
+// One second is the floor on what the API can distinguish, so this is a
+// tolerance rather than a fix for a comparison that was merely off. Widening
+// it that far is safe here because the original Pod is already excluded by
+// name above, and every other candidate must be controller-owned by a
+// ReplicaSet of the target Deployment.
+func actionSecond(actionStartedAt time.Time) time.Time {
+	return actionStartedAt.Truncate(time.Second)
 }
 
 func podSpecHasContainer(pod *corev1.Pod, containerName string) bool {

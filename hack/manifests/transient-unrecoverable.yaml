@@ -1,0 +1,41 @@
+# transient-unrecoverable-demo — restart_pod is attempted and FAILS.
+#
+# The mirror image of transient-recovers.yaml: the same "connection refused"
+# evidence, so the classifier proposes the same automatable restart_pod, but
+# every replacement pod crashes the same way. The verifier's readiness timeout
+# expires, and the run ends in OutcomeRolledBack.
+#
+# What this proves that rollout-unrecoverable.yaml does not: the rollback path
+# reached from the *restart_pod* action, where the snapshot restore is a no-op
+# because restart_pod never touched the Deployment spec. The state machine
+# must still walk ROLLING_BACK -> ROLLED_BACK -> LOGGED and report a
+# rolled_back outcome rather than treating an unchanged spec as success.
+#
+# No hostPath and no state: this one is stateless and re-runnable as often as
+# you like.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: transient-unrecoverable-demo
+  labels:
+    app: transient-unrecoverable-demo
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  selector:
+    matchLabels:
+      app: transient-unrecoverable-demo
+  template:
+    metadata:
+      labels:
+        app: transient-unrecoverable-demo
+    spec:
+      containers:
+        - name: workload
+          image: busybox:1.36
+          command:
+            - sh
+            - -c
+            - |
+              echo "dial tcp 10.96.0.99:5432: connect: connection refused"
+              exit 1

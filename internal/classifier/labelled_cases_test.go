@@ -425,15 +425,15 @@ func TestLabelledClassificationCasesIntegrity(t *testing.T) {
 		}
 		names[tc.Name] = struct{}{}
 
-		if tc.Input.DetectionEvent.PodName == "" {
+		if tc.Input.PodName == "" {
 			t.Errorf("case %q has empty pod name", tc.Name)
 		}
 
-		if tc.Input.DetectionEvent.Namespace == "" {
+		if tc.Input.Namespace == "" {
 			t.Errorf("case %q has empty namespace", tc.Name)
 		}
 
-		if tc.Input.DetectionEvent.ContainerName == "" {
+		if tc.Input.ContainerName == "" {
 			t.Errorf("case %q has empty container name", tc.Name)
 		}
 

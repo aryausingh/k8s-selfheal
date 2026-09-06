@@ -10,6 +10,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -22,7 +23,23 @@ const (
 	testDeploymentName    = "demo"
 	busyboxImage          = "busybox:1.36"
 	workloadContainerName = "workload"
+
+	testDeploymentUID = types.UID("demo-deployment-uid")
 )
+
+// ownedBy builds the controller reference a real ReplicaSet always carries.
+// RolloutUndo requires it: label matching alone cannot distinguish this
+// Deployment's ReplicaSets from another Deployment's that shares labels.
+func ownedBy(name string, uid types.UID) []metav1.OwnerReference {
+	controller := true
+	return []metav1.OwnerReference{{
+		APIVersion: "apps/v1",
+		Kind:       "Deployment",
+		Name:       name,
+		UID:        uid,
+		Controller: &controller,
+	}}
+}
 
 func testScheme(t *testing.T) *runtime.Scheme {
 	t.Helper()
@@ -96,13 +113,14 @@ func TestRolloutUndo_DeploymentMissing_ReturnsError(t *testing.T) {
 func TestRolloutUndo_NoPriorRevision_ReturnsError(t *testing.T) {
 	selector := map[string]string{"app": testDeploymentName}
 	deploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace, Annotations: withRevision("1")},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace, UID: testDeploymentUID, Annotations: withRevision("1")},
 		Spec:       appsv1.DeploymentSpec{Selector: &metav1.LabelSelector{MatchLabels: selector}},
 	}
 	// Only the current revision's ReplicaSet exists — nothing strictly
 	// below revision 1 for RolloutUndo to fall back to.
 	rs := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs1", Namespace: testNamespace, Labels: selector, Annotations: withRevision("1")},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs1", Namespace: testNamespace, Labels: selector,
+			OwnerReferences: ownedBy(testDeploymentName, testDeploymentUID), Annotations: withRevision("1")},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs).Build()
 	event := contracts.DetectionEvent{Namespace: testNamespace, OwnerDeployment: testDeploymentName}
@@ -127,23 +145,26 @@ func TestRolloutUndo_RevertsToImmediatelyPrecedingRevision(t *testing.T) {
 	}
 
 	deploy := &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace, Annotations: withRevision("3")},
+		ObjectMeta: metav1.ObjectMeta{Name: testDeploymentName, Namespace: testNamespace, UID: testDeploymentUID, Annotations: withRevision("3")},
 		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: selector},
 			Template: badTemplateRev3, // current (broken) state
 		},
 	}
 	rs1 := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs1", Namespace: testNamespace, Labels: selector, Annotations: withRevision("1")},
-		Spec:       appsv1.ReplicaSetSpec{Template: oldestTemplateRev1},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs1", Namespace: testNamespace, Labels: selector,
+			OwnerReferences: ownedBy(testDeploymentName, testDeploymentUID), Annotations: withRevision("1")},
+		Spec: appsv1.ReplicaSetSpec{Template: oldestTemplateRev1},
 	}
 	rs2 := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs2", Namespace: testNamespace, Labels: selector, Annotations: withRevision("2")},
-		Spec:       appsv1.ReplicaSetSpec{Template: goodTemplateRev2},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs2", Namespace: testNamespace, Labels: selector,
+			OwnerReferences: ownedBy(testDeploymentName, testDeploymentUID), Annotations: withRevision("2")},
+		Spec: appsv1.ReplicaSetSpec{Template: goodTemplateRev2},
 	}
 	rs3 := &appsv1.ReplicaSet{
-		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs3", Namespace: testNamespace, Labels: selector, Annotations: withRevision("3")},
-		Spec:       appsv1.ReplicaSetSpec{Template: badTemplateRev3},
+		ObjectMeta: metav1.ObjectMeta{Name: "demo-rs3", Namespace: testNamespace, Labels: selector,
+			OwnerReferences: ownedBy(testDeploymentName, testDeploymentUID), Annotations: withRevision("3")},
+		Spec: appsv1.ReplicaSetSpec{Template: badTemplateRev3},
 	}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs1, rs2, rs3).Build()
 	event := contracts.DetectionEvent{Namespace: testNamespace, OwnerDeployment: testDeploymentName}
@@ -160,6 +181,66 @@ func TestRolloutUndo_RevertsToImmediatelyPrecedingRevision(t *testing.T) {
 	wantCmd := goodTemplateRev2.Spec.Containers[0].Command
 	if !equalStrSlice(gotCmd, wantCmd) {
 		t.Errorf("template reverted to command %v, want the immediately preceding revision's command %v (must not jump straight to the oldest revision)", gotCmd, wantCmd)
+	}
+}
+
+// A ReplicaSet can satisfy another Deployment's selector labels without
+// belonging to it. Reverting this Deployment's template to a foreign
+// ReplicaSet's template would silently swap the workload for someone else's,
+// so ownership is checked by controller-reference UID rather than by labels.
+func TestRolloutUndo_IgnoresLabelMatchingReplicaSetOwnedByAnotherDeployment(t *testing.T) {
+	selector := map[string]string{"app": testDeploymentName}
+	currentTemplate := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: workloadContainerName, Image: busyboxImage,
+			Command: []string{"sh", "-c", "sleep 1; exit 1"},
+		}}},
+	}
+	foreignTemplate := corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: workloadContainerName, Image: busyboxImage,
+			Command: []string{"sh", "-c", "echo someone-elses-workload"},
+		}}},
+	}
+
+	deploy := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testDeploymentName, Namespace: testNamespace,
+			UID: testDeploymentUID, Annotations: withRevision("2"),
+		},
+		Spec: appsv1.DeploymentSpec{
+			Selector: &metav1.LabelSelector{MatchLabels: selector},
+			Template: currentTemplate,
+		},
+	}
+	// Same labels, same namespace, a lower revision — eligible on every
+	// criterion except the one that matters.
+	foreign := &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "other-rs1", Namespace: testNamespace, Labels: selector,
+			OwnerReferences: ownedBy("other-deployment", types.UID("other-deployment-uid")),
+			Annotations:     withRevision("1"),
+		},
+		Spec: appsv1.ReplicaSetSpec{Template: foreignTemplate},
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, foreign).Build()
+	event := contracts.DetectionEvent{Namespace: testNamespace, OwnerDeployment: testDeploymentName}
+
+	err := RolloutUndo(context.Background(), c, event)
+
+	if err == nil || !strings.Contains(err.Error(), "no prior revision available") {
+		t.Fatalf("RolloutUndo() error = %v, want \"no prior revision available\"", err)
+	}
+
+	var got appsv1.Deployment
+	if getErr := c.Get(context.Background(),
+		client.ObjectKey{Namespace: testNamespace, Name: testDeploymentName}, &got); getErr != nil {
+		t.Fatalf("re-fetching deployment: %v", getErr)
+	}
+	if !equalStrSlice(got.Spec.Template.Spec.Containers[0].Command,
+		currentTemplate.Spec.Containers[0].Command) {
+		t.Errorf("template = %v, want it left untouched; a foreign ReplicaSet must never be a rollback target",
+			got.Spec.Template.Spec.Containers[0].Command)
 	}
 }
 

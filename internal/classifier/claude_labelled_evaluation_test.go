@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -450,7 +450,7 @@ func (s claudeLabelledEvaluationStats) sortedReasonCodes() []string {
 		)
 	}
 
-	sort.Strings(reasonCodes)
+	slices.Sort(reasonCodes)
 
 	return reasonCodes
 }

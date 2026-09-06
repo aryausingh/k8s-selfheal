@@ -159,3 +159,62 @@ func fakeClientWithObjects(t *testing.T, objects ...runtime.Object) client.Clien
 	}
 	return fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(objects...).Build()
 }
+
+// TestDeploymentPodResolverAcceptsReplacementCreatedInTheSameSecond pins the
+// live-cluster failure that the fixtures above cannot express: every other test
+// here starts the action on a whole second (time.Unix(100, 0)), so truncating
+// ActionStartedAt is a no-op and the sub-second mismatch stays invisible.
+//
+// In a real run the action starts mid-second and the API server reports Pod
+// creation truncated to the second, so the replacement looks *older* than the
+// action that created it. Before the fix this resolver rejected it for the
+// whole readiness timeout and a recovered workload was reported rolled_back.
+func TestDeploymentPodResolverAcceptsReplacementCreatedInTheSameSecond(t *testing.T) {
+	// Mid-second start, as a real remediation always has.
+	actionStartedAt := time.Unix(100, 516018000)
+	objects := deploymentPodObjects(actionStartedAt)
+	deployment, replicaSet, replacement := objects[0], objects[1], objects[2]
+
+	// What the API server actually returns: the same second, sub-second zeroed.
+	replacement.(*corev1.Pod).CreationTimestamp = metav1.NewTime(time.Unix(100, 0))
+
+	resolver := &DeploymentPodResolver{
+		Reader: fakeClientWithObjects(t, deployment, replicaSet, replacement),
+	}
+
+	pod, err := resolver.Resolve(context.Background(), VerificationTarget{
+		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:   "app",
+		ActionStartedAt: actionStartedAt,
+	})
+	if err != nil {
+		t.Fatalf("Resolve() error = %v, want the same-second replacement", err)
+	}
+	if pod.Name != "checkout-new" {
+		t.Fatalf("resolved Pod = %q, want checkout-new", pod.Name)
+	}
+}
+
+// A Pod from the previous second is still genuinely pre-action: the tolerance
+// is exactly one second wide, not unbounded.
+func TestDeploymentPodResolverStillRejectsPodFromThePreviousSecond(t *testing.T) {
+	actionStartedAt := time.Unix(100, 516018000)
+	objects := deploymentPodObjects(actionStartedAt)
+	deployment, replicaSet, replacement := objects[0], objects[1], objects[2]
+	replacement.(*corev1.Pod).CreationTimestamp = metav1.NewTime(time.Unix(99, 0))
+
+	resolver := &DeploymentPodResolver{
+		Reader: fakeClientWithObjects(t, deployment, replicaSet, replacement),
+	}
+
+	_, err := resolver.Resolve(context.Background(), VerificationTarget{
+		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:   "app",
+		ActionStartedAt: actionStartedAt,
+	})
+	if !errors.Is(err, ErrDeploymentPodNotFound) {
+		t.Fatalf("Resolve() error = %v, want ErrDeploymentPodNotFound", err)
+	}
+}

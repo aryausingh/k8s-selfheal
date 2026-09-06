@@ -328,7 +328,7 @@ func classifyWithOllama(
 		return result
 	}
 
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {

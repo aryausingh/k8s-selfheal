@@ -18,6 +18,37 @@ const (
 	DecisionFallbackMiss = "fallback_miss"
 )
 
+// The sub-causes a proposal may carry. These are the keys of
+// allowedSubCauses, the cases of validateSemanticConsistency's switch, and
+// part of the LLM prompt's enum, so they are spelled out in enough places
+// that a typo in any one of them silently degrades a classification to an
+// unsupported sub-cause rather than failing loudly.
+const (
+	SubCauseTransientFailure = "transient_failure"
+	SubCauseBadDeploy        = "bad_deploy"
+	SubCauseBadConfig        = "bad_config"
+	SubCauseApplicationPanic = "application_panic"
+	SubCauseOOMAdjacent      = "oom_adjacent"
+	SubCauseUnknown          = "unknown"
+)
+
+// Wire-protocol values shared by the Claude and Mistral clients. Both are
+// Messages-API style, so both label the single outbound turn the same way.
+const (
+	roleUser = "user"
+
+	// The content-block type carrying the model's text output.
+	textBlockType = "text"
+)
+
+// Target.Kind values. Only these two are ever produced: restart_pod targets
+// the Pod, rollout_undo targets the owning Deployment, and an escalation
+// targets the Pod so a human receives the exact incident resource.
+const (
+	TargetKindPod        = "Pod"
+	TargetKindDeployment = "Deployment"
+)
+
 const (
 	ReasonCodeNone                      = ""
 	ReasonCodeUnsupportedSubCause       = "unsupported_sub_cause"

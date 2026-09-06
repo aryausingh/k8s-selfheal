@@ -17,12 +17,12 @@ var allowedResponseActions = map[string]struct{}{
 }
 
 var allowedSubCauses = map[string]struct{}{
-	"transient_failure": {},
-	"bad_deploy":        {},
-	"bad_config":        {},
-	"application_panic": {},
-	"oom_adjacent":      {},
-	"unknown":           {},
+	SubCauseTransientFailure: {},
+	SubCauseBadDeploy:        {},
+	SubCauseBadConfig:        {},
+	SubCauseApplicationPanic: {},
+	SubCauseOOMAdjacent:      {},
+	SubCauseUnknown:          {},
 }
 
 // ValidateProposal validates the LLM's triage result against
@@ -143,7 +143,7 @@ func validateAutomatableProposal(
 
 	switch proposal.RecommendedAction {
 	case ActionRestartPod:
-		if proposal.SubCause != "transient_failure" {
+		if proposal.SubCause != SubCauseTransientFailure {
 			return invalidResult(
 				proposal,
 				ReasonCodeUnsafeExecutableAction,
@@ -151,7 +151,7 @@ func validateAutomatableProposal(
 			)
 		}
 
-		if proposal.Target.Kind != "Pod" {
+		if proposal.Target.Kind != TargetKindPod {
 			return invalidResult(
 				proposal,
 				ReasonCodeWrongTargetKind,
@@ -172,7 +172,7 @@ func validateAutomatableProposal(
 		}
 
 	case ActionRolloutUndo:
-		if proposal.SubCause != "bad_deploy" {
+		if proposal.SubCause != SubCauseBadDeploy {
 			return invalidResult(
 				proposal,
 				ReasonCodeUnsafeExecutableAction,
@@ -180,7 +180,7 @@ func validateAutomatableProposal(
 			)
 		}
 
-		if proposal.Target.Kind != "Deployment" {
+		if proposal.Target.Kind != TargetKindDeployment {
 			return invalidResult(
 				proposal,
 				ReasonCodeWrongTargetKind,
@@ -231,7 +231,7 @@ func validateEscalationProposal(
 
 	// For escalation, target the affected pod so the human receives
 	// the exact incident resource.
-	if proposal.Target.Kind != "Pod" {
+	if proposal.Target.Kind != TargetKindPod {
 		return invalidResult(
 			proposal,
 			ReasonCodeWrongTargetKind,
@@ -314,7 +314,7 @@ func validateSemanticConsistency(
 
 	switch proposal.SubCause {
 
-	case "transient_failure":
+	case SubCauseTransientFailure:
 		if !containsAny(
 			evidence,
 			"connection refused",
@@ -330,7 +330,20 @@ func validateSemanticConsistency(
 			}
 		}
 
-	case "bad_deploy":
+	case SubCauseBadDeploy:
+		// The image-pull indicators below cannot co-occur with the only
+		// failure this system detects. A pod that cannot pull its image never
+		// reaches CrashLoopBackOff — it sits in ImagePullBackOff, which the
+		// detector does not watch — so before "back-off restarting failed
+		// container" was added here, bad_deploy was unsatisfiable in practice
+		// and rollout_undo could never fire.
+		//
+		// That indicator alone is weak: every crash-looping pod produces it.
+		// It is the hasRecentDeploymentEvidence check immediately below that
+		// makes this discriminating — the crash must also coincide with a
+		// rollout — and the caller is responsible for only supplying
+		// genuinely recent events, since the check itself has no notion of
+		// time (internal/controller/evidence.go enforces that window).
 		if !containsAny(
 			evidence,
 			"imagepullbackoff",
@@ -338,6 +351,7 @@ func validateSemanticConsistency(
 			"invalid image",
 			"invalid-version",
 			"back-off pulling image",
+			"back-off restarting failed container",
 		) {
 			return semanticConsistencyFailure{
 				reasonCode: ReasonCodeSemanticGuardRejected,
@@ -352,7 +366,7 @@ func validateSemanticConsistency(
 			}
 		}
 
-	case "bad_config":
+	case SubCauseBadConfig:
 		if !containsAny(
 			evidence,
 			"configmap",
@@ -367,7 +381,7 @@ func validateSemanticConsistency(
 			}
 		}
 
-	case "oom_adjacent":
+	case SubCauseOOMAdjacent:
 		if !containsAny(
 			evidence,
 			"oomkilled",
@@ -381,7 +395,7 @@ func validateSemanticConsistency(
 			}
 		}
 
-	case "application_panic":
+	case SubCauseApplicationPanic:
 		if !containsAny(
 			evidence,
 			"panic",
@@ -394,7 +408,7 @@ func validateSemanticConsistency(
 			}
 		}
 
-	case "unknown":
+	case SubCauseUnknown:
 		// Unknown is always allowed because insufficient evidence
 		// should safely result in escalation rather than automation.
 		return semanticConsistencyFailure{}

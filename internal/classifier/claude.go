@@ -1,4 +1,3 @@
-
 package classifier
 
 import (
@@ -143,13 +142,13 @@ func (c *ClaudeClassifier) ClassifyWithMetadata(
 ) {
 	if c == nil {
 		return Proposal{}, ClassifierCallMetadata{}, fmt.Errorf(
-			"Claude classifier is nil",
+			"claude classifier is nil",
 		)
 	}
 
 	if strings.TrimSpace(c.apiKey) == "" {
 		return Proposal{}, ClassifierCallMetadata{}, fmt.Errorf(
-			"Claude API key is empty",
+			"claude API key is empty",
 		)
 	}
 
@@ -172,7 +171,7 @@ func (c *ClaudeClassifier) ClassifyWithMetadata(
 
 		Messages: []claudeMessage{
 			{
-				Role:    "user",
+				Role:    roleUser,
 				Content: userPrompt,
 			},
 		},
@@ -237,7 +236,7 @@ func (c *ClaudeClassifier) ClassifyWithMetadata(
 		)
 	}
 
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -292,10 +291,7 @@ func (c *ClaudeClassifier) ClassifyWithMetadata(
 func claudeCallMetadata(
 	usage claudeUsage,
 ) ClassifierCallMetadata {
-	tokenUsage := TokenUsage{
-		InputTokens:  usage.InputTokens,
-		OutputTokens: usage.OutputTokens,
-	}
+	tokenUsage := TokenUsage(usage)
 
 	return ClassifierCallMetadata{
 		InputTokens:  nonNegativeInt(usage.InputTokens),
@@ -337,7 +333,7 @@ func extractClaudeText(
 
 	for _, content := range response.Content {
 
-		if content.Type == "text" &&
+		if content.Type == textBlockType &&
 			strings.TrimSpace(content.Text) != "" {
 
 			return strings.TrimSpace(content.Text), nil
@@ -345,7 +341,7 @@ func extractClaudeText(
 	}
 
 	return "", fmt.Errorf(
-		"Claude response did not contain text output",
+		"claude response did not contain text output",
 	)
 }
 
@@ -365,14 +361,14 @@ func parseClaudeAPIError(
 		apiError.Error.Message != "" {
 
 		return fmt.Errorf(
-			"Claude API returned HTTP %d: %s",
+			"claude API returned HTTP %d: %s",
 			statusCode,
 			apiError.Error.Message,
 		)
 	}
 
 	return fmt.Errorf(
-		"Claude API returned HTTP %d: %s",
+		"claude API returned HTTP %d: %s",
 		statusCode,
 		strings.TrimSpace(string(body)),
 	)
@@ -380,6 +376,11 @@ func parseClaudeAPIError(
 
 // proposalJSONSchema defines the exact Proposal structure
 // expected from Claude.
+//
+// literal map is readable precisely because it mirrors the JSON it produces;
+// replacing "type" and "enum" with Go identifiers would obscure that.
+//
+//nolint:goconst // These are JSON Schema keywords, not domain values. The
 func proposalJSONSchema() map[string]any {
 
 	return map[string]any{
@@ -391,12 +392,12 @@ func proposalJSONSchema() map[string]any {
 			"sub_cause": map[string]any{
 				"type": "string",
 				"enum": []string{
-					"transient_failure",
-					"bad_deploy",
-					"bad_config",
-					"application_panic",
-					"oom_adjacent",
-					"unknown",
+					SubCauseTransientFailure,
+					SubCauseBadDeploy,
+					SubCauseBadConfig,
+					SubCauseApplicationPanic,
+					SubCauseOOMAdjacent,
+					SubCauseUnknown,
 				},
 			},
 
@@ -419,8 +420,8 @@ func proposalJSONSchema() map[string]any {
 						"type":      "string",
 						"minLength": 1,
 						"enum": []string{
-							"Pod",
-							"Deployment",
+							TargetKindPod,
+							TargetKindDeployment,
 						},
 					},
 
