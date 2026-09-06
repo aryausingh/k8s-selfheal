@@ -8,6 +8,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/aryausingh/k8s-selfheal/internal/contracts"
@@ -57,7 +58,19 @@ func RolloutUndo(ctx context.Context, c client.Client, event contracts.Detection
 		revision int
 	}
 	var prior []candidate
-	for _, rs := range rsList.Items {
+	for index := range rsList.Items {
+		rs := rsList.Items[index]
+		// Label matching alone is not ownership. Spec.Selector.MatchLabels can
+		// be satisfied by a ReplicaSet belonging to an entirely different
+		// Deployment that happens to share labels — and rolling this
+		// Deployment's template back to *that* ReplicaSet's template would
+		// silently replace the workload with someone else's. Requiring the
+		// candidate to be controller-owned by this Deployment (IsControlledBy
+		// compares the controller reference's UID, not just its name) closes
+		// that off.
+		if !metav1.IsControlledBy(&rs, &deploy) {
+			continue
+		}
 		revStr, ok := rs.Annotations[revisionAnnotation]
 		if !ok {
 			continue
