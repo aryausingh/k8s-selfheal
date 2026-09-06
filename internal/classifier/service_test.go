@@ -107,13 +107,21 @@ func (c delayedClassifier) Classify(
 }
 
 func TestClassificationServiceSatisfiesIncidentClassifier(t *testing.T) {
+	// The assignment itself is the assertion: it fails to compile if
+	// *ClassificationService stops satisfying IncidentClassifier. Comparing
+	// the result against nil cannot express that — the constructor always
+	// returns a non-nil pointer, so the check was unreachable and staticcheck
+	// (SA4023) flagged it as never true.
 	var incidentClassifier IncidentClassifier = NewClassificationService(
 		MockClassifier{},
 		time.Second,
 	)
 
-	if incidentClassifier == nil {
-		t.Fatal("expected ClassificationService to satisfy IncidentClassifier")
+	if _, ok := incidentClassifier.(*ClassificationService); !ok {
+		t.Fatalf(
+			"IncidentClassifier holds %T, want *ClassificationService",
+			incidentClassifier,
+		)
 	}
 }
 

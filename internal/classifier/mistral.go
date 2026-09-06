@@ -122,13 +122,13 @@ func (m *MistralClassifier) Classify(
 
 	if m == nil {
 		return Proposal{}, fmt.Errorf(
-			"Mistral classifier is nil",
+			"mistral classifier is nil",
 		)
 	}
 
 	if strings.TrimSpace(m.apiKey) == "" {
 		return Proposal{}, fmt.Errorf(
-			"Mistral API key is empty",
+			"mistral API key is empty",
 		)
 	}
 
@@ -152,7 +152,7 @@ func (m *MistralClassifier) Classify(
 				Content: systemPrompt,
 			},
 			{
-				Role:    "user",
+				Role:    roleUser,
 				Content: userPrompt,
 			},
 		},
@@ -211,7 +211,7 @@ func (m *MistralClassifier) Classify(
 		)
 	}
 
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	responseBody, err := io.ReadAll(response.Body)
 	if err != nil {
@@ -244,7 +244,7 @@ func (m *MistralClassifier) Classify(
 
 	if len(mistralResponseData.Choices) == 0 {
 		return Proposal{}, fmt.Errorf(
-			"Mistral response contained no choices",
+			"mistral response contained no choices",
 		)
 	}
 
@@ -254,7 +254,7 @@ func (m *MistralClassifier) Classify(
 
 	if outputText == "" {
 		return Proposal{}, fmt.Errorf(
-			"Mistral response contained empty model output",
+			"mistral response contained empty model output",
 		)
 	}
 
@@ -290,14 +290,14 @@ func parseMistralAPIError(
 		apiError.Error.Message != "" {
 
 		return fmt.Errorf(
-			"Mistral API returned HTTP %d: %s",
+			"mistral API returned HTTP %d: %s",
 			statusCode,
 			apiError.Error.Message,
 		)
 	}
 
 	return fmt.Errorf(
-		"Mistral API returned HTTP %d: %s",
+		"mistral API returned HTTP %d: %s",
 		statusCode,
 		strings.TrimSpace(string(body)),
 	)
