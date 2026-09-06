@@ -56,16 +56,28 @@ incident on the same Deployment and is capped at 25.
 means evidence collection is not working — check the `Evidence` wiring in
 `cmd/main.go`, and RBAC if running deployed rather than via `make run`.
 
-Timing is the other thing to read, because the two outcomes are
-distinguishable by MTTR alone. A `recovered` run passes readiness almost
-immediately and then sits out the full 60s stability window, landing at
-**~65s**. A `rolled_back` run gives up at the 30s readiness timeout, landing at
-**~30.0s** — near-exactly, since it is a timeout rather than a measurement.
-Both constants live in `internal/safety/verifier.go`.
+Timing tells you which verifier phase ended the run. The constants are in
+`internal/safety/verifier.go`: a 30s readiness timeout, then a 60s stability
+window polled every 5s.
 
-An MTTR of exactly 30s on a workload you expected to recover means the verifier
-never found the replacement Pod, not that the workload failed to come up. Check
-whether the replacement is Running before assuming the remediation was wrong.
+| MTTR | Phase | `ROLLING_BACK` reason |
+|---|---|---|
+| ~65s | Passed both | — (`recovered`) |
+| ~30.0s | Never became Ready | `pod did not become Ready before initial readiness timeout` |
+| 5–60s | Came up Ready, then died | `pod lost Ready during stability window` |
+
+The third row is the one that is easy to forget exists. A container that runs
+for a second before exiting reaches Ready long enough to satisfy the readiness
+phase, so the run gets *past* the timeout and then fails partway through the
+stability window at whatever poll catches it. `transient-unrecoverable`
+produces both of the bottom two rows depending on where in its own crash
+back-off the replacement Pod happens to be when the verifier looks — so an
+MTTR that is neither ~30s nor ~65s is not a bug.
+
+An MTTR of near-exactly 30.0s on a workload you expected to recover means the
+verifier never found a Ready replacement Pod, which is not the same as the
+workload failing to come up. Check whether the replacement is Running before
+concluding the remediation was wrong.
 
 ---
 
@@ -95,11 +107,17 @@ kubectl delete -f hack/manifests/transient-recovers.yaml
 kubectl apply -f hack/manifests/transient-unrecoverable.yaml
 ```
 
-Same evidence, same automatable decision — but every replacement crashes too.
-The verifier gives up at the readiness timeout and the service rolls back.
-The snapshot restore is a no-op here (`restart_pod` never changed the
-Deployment spec), which is the point: the outcome must still be `rolled_back`,
-not silently treated as success.
+Same evidence, same automatable decision — but every replacement crashes too,
+so the verifier fails and the service rolls back. The snapshot restore is a
+no-op here (`restart_pod` never changed the Deployment spec), which is the
+point: the outcome must still be `rolled_back`, not silently treated as
+success because the spec already matched.
+
+This scenario reaches the rollback through *either* verifier exit, depending on
+timing — the container stays up for about a second, so a replacement caught
+early is Ready when the verifier first looks and then dies inside the stability
+window, while one caught mid-back-off never becomes Ready at all. Both are
+correct; see the MTTR table above.
 
 ```bash
 kubectl delete -f hack/manifests/transient-unrecoverable.yaml
