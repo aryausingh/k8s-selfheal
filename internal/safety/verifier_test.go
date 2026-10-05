@@ -48,6 +48,13 @@ type sequenceResolver struct {
 	position int
 }
 
+func (r *sequenceResolver) CapturePreActionPodUIDs(
+	context.Context,
+	VerificationTarget,
+) (PodUIDSet, error) {
+	return PodUIDSet{types.UID("original-uid"): {}}, nil
+}
+
 func (r *sequenceResolver) Resolve(context.Context, VerificationTarget) (*corev1.Pod, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -136,11 +143,11 @@ func observedPod(
 
 func verificationTarget() VerificationTarget {
 	return VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "original-pod", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		RestartCount:    3,
-		ActionStartedAt: time.Unix(1, 0),
+		OriginalPod:      types.NamespacedName{Name: "original-pod", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		RestartCount:     3,
+		PreActionPodUIDs: PodUIDSet{types.UID("original-uid"): {}},
 	}
 }
 

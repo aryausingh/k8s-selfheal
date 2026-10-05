@@ -61,6 +61,11 @@ type PodReconciler struct {
 	Audit     safety.AuditWriter
 	Clock     safety.Clock
 
+	// AuditMetadata is supplied by the experiment harness configuration and
+	// copied onto every Owner 2 transition. The controller does not infer
+	// workload or arm labels from remediation behavior.
+	AuditMetadata safety.AuditMetadata
+
 	// incidents holds one remediation record per Deployment, keyed by
 	// "namespace/OwnerDeployment" — deliberately NOT pod UID. RestartPod
 	// deletes the crash-looping pod and the ReplicaSet controller creates a
@@ -146,7 +151,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 
 			key := incidentKey(event.Namespace, event.OwnerDeployment)
-			podRef := event.Namespace + "/" + event.PodName
 			record, decision := r.beginAttempt(key, generation, time.Now())
 			if decision == admitExhausted {
 				// Logged exactly once: beginAttempt sets the terminal outcome
@@ -155,7 +159,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				logger.Info("EXHAUSTED — attempt budget spent, going quiet until the deployment changes",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
 					"incidentID", record.id, "attempts", record.attemptCount)
-				r.closeIncidentIfTerminal(ctx, key, podRef, "")
+				r.closeIncidentIfTerminal(ctx, key)
 			}
 			if decision != admitProceed {
 				if decision == admitSkip {
@@ -174,7 +178,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"cannot classify incident — escalating by default rather than automating blind",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
-				r.closeIncidentIfTerminal(ctx, key, podRef, "")
+				r.closeIncidentIfTerminal(ctx, key)
 				break
 			}
 
@@ -214,9 +218,6 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			classification := r.Classifier.ClassifyIncident(ctx, incident)
 			proposal := classification.Proposal
-			// Recorded for t_classify, which the metrics adapter reads off
-			// the CLOSED line rather than instrumenting separately.
-			r.setClassifierDuration(key, classification.ClassifierDuration)
 
 			// classifyErr is always nil at this call site: ClassifyIncident
 			// never returns an error — a failed or invalid classification is
@@ -234,7 +235,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"fallbackUsed", classification.FallbackUsed,
 					"fallbackReason", classification.FallbackReason)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
-				r.closeIncidentIfTerminal(ctx, key, podRef, proposal.RecommendedAction)
+				r.closeIncidentIfTerminal(ctx, key)
 				break
 			}
 
@@ -248,7 +249,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"classifier recommended an action with no matching implementation — escalating instead",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeRejected, time.Now())
-				r.closeIncidentIfTerminal(ctx, key, podRef, proposal.RecommendedAction)
+				r.closeIncidentIfTerminal(ctx, key)
 				break
 			}
 
@@ -260,6 +261,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				Action:    action,
 				Audit:     r.Audit,
 				Clock:     r.Clock,
+				Metadata:  r.AuditMetadata,
 			}
 
 			// Dispatched into a goroutine against ManagerCtx, not this
@@ -282,7 +284,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					// No-op unless this attempt ended the incident: a
 					// rolled_back attempt with budget left leaves it active
 					// and the next reconcile retries under backoff.
-					r.closeIncidentIfTerminal(r.ManagerCtx, key, podRef, action.Name())
+					r.closeIncidentIfTerminal(r.ManagerCtx, key)
 				}()
 
 				outcome, err := service.Remediate(r.ManagerCtx, event)

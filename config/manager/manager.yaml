@@ -55,6 +55,7 @@ spec:
         # This ensures that deployments meet the highest security requirements for Kubernetes.
         # For more details, see: https://kubernetes.io/docs/concepts/security/pod-security-standards/#restricted
         runAsNonRoot: true
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -63,6 +64,7 @@ spec:
         args:
           - --leader-elect
           - --health-probe-bind-address=:8081
+          - --audit-path=/var/lib/sage/audit/audit.jsonl
         image: controller:latest
         name: manager
         ports:
@@ -96,7 +98,27 @@ spec:
           requests:
             cpu: 10m
             memory: 64Mi
-        volumeMounts: []
-      volumes: []
+        volumeMounts:
+        - name: audit-data
+          mountPath: /var/lib/sage/audit
+      volumes:
+      - name: audit-data
+        persistentVolumeClaim:
+          claimName: audit-data
       serviceAccountName: controller-manager
       terminationGracePeriodSeconds: 10
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: audit-data
+  namespace: system
+  labels:
+    app.kubernetes.io/name: k8s-selfheal
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  accessModes:
+  - ReadWriteOnce
+  resources:
+    requests:
+      storage: 1Gi

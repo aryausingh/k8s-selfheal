@@ -3,7 +3,6 @@ package safety
 import (
 	"context"
 	"fmt"
-	"path"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -11,6 +10,7 @@ import (
 
 // PodVerifier is the verification seam used by the Owner 2 service.
 type PodVerifier interface {
+	CapturePreActionPodUIDs(context.Context, VerificationTarget) (PodUIDSet, error)
 	Verify(context.Context, VerificationTarget) (VerificationResult, error)
 }
 
@@ -27,6 +27,7 @@ type Service struct {
 	Action    RemediationAction
 	Audit     AuditWriter
 	Clock     Clock
+	Metadata  AuditMetadata
 }
 
 // Remediate snapshots, invokes the injected action, verifies for the stability
@@ -43,11 +44,14 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 	entries := make([]AuditEntry, 0, 8)
 	record := func(state State, result string) (AuditEntry, error) {
 		entry := AuditEntry{
-			Timestamp: s.Clock.Now(),
-			Pod:       path.Join(event.Namespace, event.PodName),
-			State:     state,
-			Action:    s.Action.Name(),
-			Result:    result,
+			IncidentID:    event.IncidentID,
+			AttemptNumber: event.AttemptNumber,
+			Timestamp:     s.Clock.Now(),
+			State:         state,
+			Action:        s.Action.Name(),
+			Result:        result,
+			Workload:      s.Metadata.Workload,
+			ArmLabel:      s.Metadata.ArmLabel,
 		}
 		if err := s.Audit.Append(entry); err != nil {
 			return AuditEntry{}, err
@@ -78,10 +82,24 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 		return Outcome{}, err
 	}
 
-	remediatingEntry, err := transition(StateRemediating, "started")
+	_, err = transition(StateRemediating, "started")
 	if err != nil {
 		return Outcome{}, err
 	}
+	verificationTarget := VerificationTarget{
+		OriginalPod: types.NamespacedName{
+			Name:      event.PodName,
+			Namespace: event.Namespace,
+		},
+		Deployment:    deploymentRef,
+		ContainerName: event.ContainerName,
+		RestartCount:  event.RestartCount,
+	}
+	preActionPodUIDs, err := s.Verifier.CapturePreActionPodUIDs(ctx, verificationTarget)
+	if err != nil {
+		return Outcome{}, fmt.Errorf("capture pre-action pod UIDs: %w", err)
+	}
+	verificationTarget.PreActionPodUIDs = preActionPodUIDs
 	if err := s.Action.Execute(ctx, event); err != nil {
 		return Outcome{}, fmt.Errorf("execute injected remediation action: %w", err)
 	}
@@ -89,19 +107,7 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 	if _, err := transition(StateVerifying, "started"); err != nil {
 		return Outcome{}, err
 	}
-	verification, err := s.Verifier.Verify(ctx, VerificationTarget{
-		OriginalPod: types.NamespacedName{
-			Name:      event.PodName,
-			Namespace: event.Namespace,
-		},
-		Deployment: types.NamespacedName{
-			Name:      event.OwnerDeployment,
-			Namespace: event.Namespace,
-		},
-		ContainerName:   event.ContainerName,
-		RestartCount:    event.RestartCount,
-		ActionStartedAt: remediatingEntry.Timestamp,
-	})
+	verification, err := s.Verifier.Verify(ctx, verificationTarget)
 	if err != nil {
 		return Outcome{}, fmt.Errorf("verify remediation: %w", err)
 	}
@@ -161,6 +167,12 @@ func validateDetectionEvent(event DetectionEvent) error {
 	}
 	if event.Timestamp.IsZero() {
 		return fmt.Errorf("remediate: event timestamp is required")
+	}
+	if event.IncidentID == "" {
+		return fmt.Errorf("remediate: incident ID is required")
+	}
+	if event.AttemptNumber < 1 {
+		return fmt.Errorf("remediate: attempt number must be at least 1")
 	}
 	return nil
 }
