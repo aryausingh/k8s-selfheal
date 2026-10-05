@@ -82,6 +82,20 @@ func (w *stubAuditWriter) Append(entry safety.AuditEntry) error {
 	return nil
 }
 
+// closedLines returns the CLOSED entries, which mark an incident terminal.
+// Exactly one per incident, or none if the incident was abandoned.
+func (w *stubAuditWriter) closedLines() []safety.AuditEntry {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var closed []safety.AuditEntry
+	for _, entry := range w.entries {
+		if entry.State == stateClosed {
+			closed = append(closed, entry)
+		}
+	}
+	return closed
+}
+
 // automateProposal builds a Proposal that passes Subhashini's validator for
 // an automatable restart_pod recommendation targeting testPodName.
 func automateProposal() classifier.Proposal {

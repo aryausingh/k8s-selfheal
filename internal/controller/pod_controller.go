@@ -146,6 +146,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 
 			key := incidentKey(event.Namespace, event.OwnerDeployment)
+			podRef := event.Namespace + "/" + event.PodName
 			record, decision := r.beginAttempt(key, generation, time.Now())
 			if decision == admitExhausted {
 				// Logged exactly once: beginAttempt sets the terminal outcome
@@ -154,6 +155,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				logger.Info("EXHAUSTED — attempt budget spent, going quiet until the deployment changes",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
 					"incidentID", record.id, "attempts", record.attemptCount)
+				r.closeIncidentIfTerminal(ctx, key, podRef, "")
 			}
 			if decision != admitProceed {
 				if decision == admitSkip {
@@ -172,6 +174,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"cannot classify incident — escalating by default rather than automating blind",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
+				r.closeIncidentIfTerminal(ctx, key, podRef, "")
 				break
 			}
 
@@ -211,6 +214,9 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 			classification := r.Classifier.ClassifyIncident(ctx, incident)
 			proposal := classification.Proposal
+			// Recorded for t_classify, which the metrics adapter reads off
+			// the CLOSED line rather than instrumenting separately.
+			r.setClassifierDuration(key, classification.ClassifierDuration)
 
 			// classifyErr is always nil at this call site: ClassifyIncident
 			// never returns an error — a failed or invalid classification is
@@ -228,6 +234,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"fallbackUsed", classification.FallbackUsed,
 					"fallbackReason", classification.FallbackReason)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
+				r.closeIncidentIfTerminal(ctx, key, podRef, proposal.RecommendedAction)
 				break
 			}
 
@@ -241,6 +248,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"classifier recommended an action with no matching implementation — escalating instead",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeRejected, time.Now())
+				r.closeIncidentIfTerminal(ctx, key, podRef, proposal.RecommendedAction)
 				break
 			}
 
@@ -269,7 +277,13 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				// the defer guarantees the in-flight claim is released even
 				// if Remediate panics.
 				result := ""
-				defer func() { r.endAttempt(key, result, time.Now()) }()
+				defer func() {
+					r.endAttempt(key, result, time.Now())
+					// No-op unless this attempt ended the incident: a
+					// rolled_back attempt with budget left leaves it active
+					// and the next reconcile retries under backoff.
+					r.closeIncidentIfTerminal(r.ManagerCtx, key, podRef, action.Name())
+				}()
 
 				outcome, err := service.Remediate(r.ManagerCtx, event)
 				if err != nil {
