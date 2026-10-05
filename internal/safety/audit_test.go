@@ -83,9 +83,7 @@ func TestJSONLFileAuditWriterPersistsConcurrentAppendsAcrossReopen(t *testing.T)
 	const entryCount = 24
 	var group sync.WaitGroup
 	for index := range entryCount {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+		group.Go(func() {
 			if appendErr := writer.Append(AuditEntry{
 				IncidentID:    "incident-concurrent",
 				AttemptNumber: 1,
@@ -98,7 +96,7 @@ func TestJSONLFileAuditWriterPersistsConcurrentAppendsAcrossReopen(t *testing.T)
 			}); appendErr != nil {
 				t.Errorf("Append() error = %v", appendErr)
 			}
-		}()
+		})
 	}
 	group.Wait()
 	if err := writer.Close(); err != nil {
