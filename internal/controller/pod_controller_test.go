@@ -630,3 +630,91 @@ func TestIncident_BackoffRunsFromAttemptEndNotAttemptStart(t *testing.T) {
 		t.Error("the next attempt must be admitted once a full backoff has elapsed since the previous one finished")
 	}
 }
+
+// --- the CLOSED incident audit line (Week 3, Owner 3 metrics adapter) -----
+
+func TestIncident_EscalationWritesAClosedAuditLine(t *testing.T) {
+	// escalated is decided before Remediate() runs, so Owner 2's Service
+	// never writes anything for it. Without the CLOSED line the metrics
+	// adapter cannot see the incident at all.
+	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
+	r := &PodReconciler{
+		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier: &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Audit:      audit,
+	}
+	ctx, _ := newTestContext()
+
+	if _, err := r.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{Namespace: testNamespace, Name: testPodName}}); err != nil {
+		t.Fatalf("expected no error, got %v", err)
+	}
+
+	closed := audit.closedLines()
+	if len(closed) != 1 {
+		t.Fatalf("expected exactly one CLOSED line, got %d", len(closed))
+	}
+	if closed[0].Result != OutcomeEscalated {
+		t.Errorf("result = %q, want %q", closed[0].Result, OutcomeEscalated)
+	}
+	if closed[0].AttemptNumber != 0 {
+		t.Errorf("attemptNumber = %d, want 0 — escalation consumes no budget", closed[0].AttemptNumber)
+	}
+	if closed[0].IncidentID == "" {
+		t.Error("the CLOSED line must carry an incidentID; the adapter groups on it")
+	}
+	if closed[0].Pod != testNamespace+"/"+testPodName {
+		t.Errorf("pod = %q, want %q", closed[0].Pod, testNamespace+"/"+testPodName)
+	}
+}
+
+func TestIncident_ExhaustionWritesAClosedAuditLine(t *testing.T) {
+	audit := &stubAuditWriter{}
+	r := &PodReconciler{Audit: audit}
+	key := incidentKey("ns1", "dep1")
+	start := time.Now()
+
+	for i := 1; i <= MaxAttempts; i++ {
+		drive(r, key, 1, start.Add(time.Duration(i)*10*time.Minute), string(safety.OutcomeRolledBack))
+	}
+	if len(audit.closedLines()) != 0 {
+		t.Fatal("a rolled_back attempt with budget left must not close the incident")
+	}
+
+	ctx, _ := newTestContext()
+	if _, decision := r.beginAttempt(key, 1, start.Add(time.Hour)); decision != admitExhausted {
+		t.Fatalf("setup: expected the budget to be spent")
+	}
+	r.closeIncidentIfTerminal(ctx, key, "ns1/pod-x", "")
+
+	closed := audit.closedLines()
+	if len(closed) != 1 {
+		t.Fatalf("expected exactly one CLOSED line, got %d", len(closed))
+	}
+	if closed[0].Result != OutcomeExhausted {
+		t.Errorf("result = %q, want %q", closed[0].Result, OutcomeExhausted)
+	}
+	if closed[0].AttemptNumber != MaxAttempts {
+		t.Errorf("attemptNumber = %d, want %d", closed[0].AttemptNumber, MaxAttempts)
+	}
+}
+
+func TestIncident_ClassifierDurationRidesOnTheClosedLine(t *testing.T) {
+	audit := &stubAuditWriter{}
+	r := &PodReconciler{Audit: audit}
+	key := incidentKey("ns1", "dep1")
+	ctx, _ := newTestContext()
+
+	r.beginAttempt(key, 1, time.Now())
+	r.setClassifierDuration(key, 1500*time.Millisecond)
+	r.endAttempt(key, OutcomeEscalated, time.Now())
+	r.closeIncidentIfTerminal(ctx, key, "ns1/pod-x", "")
+
+	closed := audit.closedLines()
+	if len(closed) != 1 {
+		t.Fatalf("expected one CLOSED line, got %d", len(closed))
+	}
+	if closed[0].ClassifierMillis != 1500 {
+		t.Errorf("classifierMillis = %d, want 1500 — t_classify is read off this line", closed[0].ClassifierMillis)
+	}
+}
