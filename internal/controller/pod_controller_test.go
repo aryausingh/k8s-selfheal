@@ -640,9 +640,10 @@ func TestIncident_EscalationWritesATerminalLoggedLine(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		Classifier: &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
-		Audit:      audit,
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier:    &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, _ := newTestContext()
 
@@ -666,11 +667,17 @@ func TestIncident_EscalationWritesATerminalLoggedLine(t *testing.T) {
 	if terminal[0].State != safety.StateLogged || terminal[0].Action != "" {
 		t.Errorf("state/action = %q/%q, want LOGGED with no dispatched action", terminal[0].State, terminal[0].Action)
 	}
+	if terminal[0].Workload != "W2" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("terminal metadata = %q/%q, want W2/enabled", terminal[0].Workload, terminal[0].ArmLabel)
+	}
 }
 
 func TestIncident_ExhaustionWritesATerminalLoggedLine(t *testing.T) {
 	audit := &stubAuditWriter{}
-	r := &PodReconciler{Audit: audit}
+	r := &PodReconciler{
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W3", ArmLabel: "enabled"},
+	}
 	key := incidentKey("ns1", "dep1")
 	start := time.Now()
 
@@ -696,5 +703,8 @@ func TestIncident_ExhaustionWritesATerminalLoggedLine(t *testing.T) {
 	}
 	if terminal[0].AttemptNumber != MaxAttempts {
 		t.Errorf("attemptNumber = %d, want %d", terminal[0].AttemptNumber, MaxAttempts)
+	}
+	if terminal[0].Workload != "W3" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("terminal metadata = %q/%q, want W3/enabled", terminal[0].Workload, terminal[0].ArmLabel)
 	}
 }

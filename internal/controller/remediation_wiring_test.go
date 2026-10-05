@@ -190,10 +190,13 @@ func TestReconcile_Escalates_WhenNotSafeForAutomation(t *testing.T) {
 
 func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
-		Actions:    map[string]safety.RemediationAction{}, // nothing registered for "restart_pod"
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier:    stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:       map[string]safety.RemediationAction{}, // nothing registered for "restart_pod"
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, sink := newTestContext()
 
@@ -204,6 +207,16 @@ func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 	}
 	if !sink.has("no matching implementation") {
 		t.Error("expected a log about the missing action, escalating instead of panicking or automating blind")
+	}
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 || terminal[0].Result != OutcomeRejected {
+		t.Fatalf("terminal audit = %+v, want one rejected LOGGED entry", terminal)
+	}
+	if terminal[0].AttemptNumber != 0 || terminal[0].Action != "" {
+		t.Errorf("rejected terminal attempt/action = %d/%q, want 0/empty", terminal[0].AttemptNumber, terminal[0].Action)
+	}
+	if terminal[0].Workload != "W2" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("rejected terminal metadata = %q/%q, want W2/enabled", terminal[0].Workload, terminal[0].ArmLabel)
 	}
 	waitForGuardCleared(t, r)
 }
@@ -250,6 +263,10 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 		if entry.Workload != "W2" || entry.ArmLabel != "enabled" {
 			t.Fatalf("audit metadata = %q/%q, want W2/enabled", entry.Workload, entry.ArmLabel)
 		}
+	}
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 || terminal[0].Result != string(safety.OutcomeRecovered) {
+		t.Fatalf("terminal audit = %+v, want exactly the Service's recovered LOGGED entry", terminal)
 	}
 	if sink.has(escalatedMsg) {
 		t.Error("a safe-for-automation proposal must not be escalated")
