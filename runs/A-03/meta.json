@@ -1,0 +1,3 @@
+{"run":"A-03","arm":"enabled","workloads":["W1","W2","W3"],"concurrent":true,
+ "injectedAt":"2026-10-06T07:14:12Z","cluster":"kind-selfheal","image":"controller:v0.3.0",
+ "note":"workload derived from the pod field; --audit-workload is process-level"}
