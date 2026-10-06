@@ -1,0 +1,264 @@
+{
+  "dataset": {
+    "runs": 28,
+    "matrixRuns": 28,
+    "valid": true
+  },
+  "experimentRecovery": {
+    "W1": {
+      "enabled": {
+        "recovered": 5,
+        "total": 5,
+        "ratePercent": 100.0
+      },
+      "disabled": {
+        "recovered": 5,
+        "total": 5,
+        "ratePercent": 100.0
+      },
+      "attributableRecoveryPercentagePoints": 0.0
+    },
+    "W2": {
+      "enabled": {
+        "recovered": 5,
+        "total": 5,
+        "ratePercent": 100.0
+      },
+      "disabled": {
+        "recovered": 0,
+        "total": 5,
+        "ratePercent": 0.0
+      },
+      "attributableRecoveryPercentagePoints": 100.0
+    },
+    "W3": {
+      "enabled": {
+        "recovered": 0,
+        "total": 5,
+        "ratePercent": 0.0
+      },
+      "disabled": {
+        "recovered": 0,
+        "total": 3,
+        "ratePercent": 0.0
+      },
+      "attributableRecoveryPercentagePoints": 0.0
+    }
+  },
+  "controller": {
+    "incidents": 15,
+    "terminalIncidents": 10,
+    "abandonedIncidents": 5,
+    "remediationAttempts": 25,
+    "rolledBackAttempts": 20,
+    "incidentsWithRollback": 10,
+    "rollbackAttemptRatePercent": 80.0,
+    "rollbackIncidentRatePercent": 50.0,
+    "terminalOutcomes": {
+      "recovered": 5,
+      "exhausted": 5,
+      "escalated": 0,
+      "rejected": 0,
+      "abandoned": 5
+    }
+  },
+  "timingSeconds": {
+    "averageTTD": 15.0138874,
+    "averageTTM": 162.5066968,
+    "averageClassifier": 6.1226,
+    "averageApply": 0.00736564,
+    "averageVerify": 36.60505004
+  },
+  "classifier": {
+    "persistedCallRecords": 15,
+    "averageLatencySeconds": 6.1226,
+    "totalInputTokens": 37070,
+    "totalOutputTokens": 3204,
+    "totalTokens": 40274,
+    "totalEstimatedCostUSD": 0.15927,
+    "pricing": {
+      "model": "claude-sonnet-4-6",
+      "inputPerMillionUSD": 3.0,
+      "outputPerMillionUSD": 15.0
+    },
+    "calls": [
+      {
+        "runID": "A1-01",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 5259,
+        "inputTokens": 1928,
+        "outputTokens": 163,
+        "totalTokens": 2091,
+        "costUSD": 0.008229,
+        "costSource": "recorded"
+      },
+      {
+        "runID": "A1-02",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 5437,
+        "inputTokens": 2105,
+        "outputTokens": 190,
+        "totalTokens": 2295,
+        "costUSD": 0.009165,
+        "costSource": "recorded"
+      },
+      {
+        "runID": "A1-03",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 4905,
+        "inputTokens": 2094,
+        "outputTokens": 171,
+        "totalTokens": 2265,
+        "costUSD": 0.008846999999999999,
+        "costSource": "recorded"
+      },
+      {
+        "runID": "A1-04",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 5335,
+        "inputTokens": 2286,
+        "outputTokens": 175,
+        "totalTokens": 2461,
+        "costUSD": 0.009483,
+        "costSource": "recorded"
+      },
+      {
+        "runID": "A1-05",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 4987,
+        "inputTokens": 2446,
+        "outputTokens": 178,
+        "totalTokens": 2624,
+        "costUSD": 0.010008,
+        "costSource": "recorded"
+      },
+      {
+        "runID": "B1-01",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6400,
+        "inputTokens": 1836,
+        "outputTokens": 199,
+        "totalTokens": 2035,
+        "costUSD": 0.008493,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "B1-02",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 5938,
+        "inputTokens": 2162,
+        "outputTokens": 217,
+        "totalTokens": 2379,
+        "costUSD": 0.009741,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "B1-03",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 7575,
+        "inputTokens": 2508,
+        "outputTokens": 259,
+        "totalTokens": 2767,
+        "costUSD": 0.011409,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "B1-04",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6180,
+        "inputTokens": 2724,
+        "outputTokens": 256,
+        "totalTokens": 2980,
+        "costUSD": 0.012012,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "B1-05",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6918,
+        "inputTokens": 2731,
+        "outputTokens": 223,
+        "totalTokens": 2954,
+        "costUSD": 0.011538,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "C1-01",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6438,
+        "inputTokens": 2709,
+        "outputTokens": 225,
+        "totalTokens": 2934,
+        "costUSD": 0.011502,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "C1-02",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6364,
+        "inputTokens": 2707,
+        "outputTokens": 234,
+        "totalTokens": 2941,
+        "costUSD": 0.011630999999999999,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "C1-03",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6836,
+        "inputTokens": 2893,
+        "outputTokens": 234,
+        "totalTokens": 3127,
+        "costUSD": 0.012188999999999998,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "C1-04",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6963,
+        "inputTokens": 3041,
+        "outputTokens": 262,
+        "totalTokens": 3303,
+        "costUSD": 0.013052999999999999,
+        "costSource": "backfilled_from_tokens"
+      },
+      {
+        "runID": "C1-05",
+        "provider": "anthropic",
+        "model": "claude-sonnet-4-6",
+        "millis": 6304,
+        "inputTokens": 2900,
+        "outputTokens": 218,
+        "totalTokens": 3118,
+        "costUSD": 0.01197,
+        "costSource": "backfilled_from_tokens"
+      }
+    ],
+    "note": "A1 calls come from classifier-calls.jsonl. Older B/C artifacts persist classifier metadata on CLOSED; their costs are backfilled deterministically from stored token counts. For C1, the older CLOSED-only instrumentation preserves the terminal classifier call rather than every attempt-level call. Represented classifier cost is not necessarily total actual experiment cost."
+  },
+  "validatorEvaluation": {
+    "sourceCommand": "go test ./internal/classifier -run '^(TestWeek3AdversarialRejectionRate|TestWeek3LegitimateAcceptanceRate)$' -count=1 -v",
+    "adversarialRejected": 15,
+    "adversarialTotal": 15,
+    "adversarialRejectionRatePercent": 100.0,
+    "legitimateAccepted": 30,
+    "legitimateTotal": 30,
+    "legitimateAcceptanceRatePercent": 100.0,
+    "falseAcceptRatePercent": 0.0,
+    "falseRejectRatePercent": 0.0
+  }
+}
