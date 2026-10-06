@@ -1,0 +1,15 @@
+{
+  "run": "B-01",
+  "arm": "disabled",
+  "workloads": ["W1", "W2", "W3"],
+  "concurrent": true,
+  "injectedAt": "2026-10-06T06:38:30Z",
+  "cutoffSeconds": 300,
+  "cluster": "kind-selfheal",
+  "note": "Controller scaled to 0, so no audit lines exist by construction. Recovery judged by hand against the same criterion as the enabled arm: Ready AND stable for a continuous 60s inside the cutoff.",
+  "observations": {
+    "W1": {"recovered": true,  "readyAtSeconds": 45,  "detail": "Ready from +45s and continuously Ready through +300s. Recovers unaided; this is the nonzero baseline."},
+    "W2": {"recovered": false, "detail": "not_recovered_within_300s. Briefly 1/1 at +15s and +90s as the container starts before exiting, but never Ready for a continuous 60s."},
+    "W3": {"recovered": false, "detail": "not_recovered_within_300s. 0/1 for the entire window."}
+  }
+}

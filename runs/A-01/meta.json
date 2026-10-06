@@ -1,0 +1,11 @@
+{
+  "run": "A-01",
+  "arm": "enabled",
+  "workloads": ["W1", "W2", "W3"],
+  "concurrent": true,
+  "injectedAt": "2026-10-06T06:34:04Z",
+  "cluster": "kind-selfheal",
+  "image": "controller:v0.3.0",
+  "commit": "cd28e79",
+  "note": "W1/W2/W3 run concurrently under one manager; workload is derived from the pod field, since --audit-workload is process-level"
+}
