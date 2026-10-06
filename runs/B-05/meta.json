@@ -1,0 +1,4 @@
+{"run":"B-05","arm":"disabled","workloads":["W1","W2","W3"],"concurrent":true,
+ "injectedAt":"2026-10-06T07:59:33Z","cutoffSeconds":300,"cluster":"kind-selfheal",
+ "note":"controller scaled to 0, so no audit lines exist by construction; recovery judged against the same Ready+60s-stable criterion",
+ "readyAtCutoff":{"W1":"true","W2":"false","W3":"false"}}
