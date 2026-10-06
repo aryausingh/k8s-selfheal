@@ -49,11 +49,28 @@ it the night before breaks the correspondence and buys nothing.
 ### Connecting to the VM
 
 The K3s API is not publicly reachable, so everything goes through an SSH
-tunnel. **Terminal A stays open all evening — it *is* the tunnel:**
+tunnel. **Terminal A stays open all day — it *is* the tunnel.**
+
+Use the reconnecting form, not a bare `ssh -N -L`. The plain one died during
+the dry run with `Operation timed out / Broken pipe` after about ninety
+minutes — the VM was fine, the connection simply dropped — and a bare tunnel
+dies silently, leaving every `kubectl` with `connection refused` and nothing
+on screen to explain it. This version comes back in about two seconds and
+prints when it happened:
 
 ```bash
-ssh -N -L 6443:127.0.0.1:6443 <username>@20.219.66.205
+while true; do
+  ssh -N -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 \
+      -o ServerAliveCountMax=3 -o ConnectTimeout=10 \
+      -L 6443:127.0.0.1:6443 azureuser@20.219.66.205
+  echo "tunnel dropped $(date -u +%H:%M:%SZ), reconnecting"
+  sleep 2
+done
 ```
+
+If `kubectl` ever says `connection refused` mid-demo, glance at Terminal A:
+either it is mid-reconnect — wait two seconds and retry — or the VM itself is
+gone, which `ssh azureuser@20.219.66.205 uptime` tells you in one command.
 
 Every other terminal:
 
