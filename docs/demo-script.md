@@ -91,9 +91,16 @@ Two failures and their fixes:
 
 ### Dry-run status
 
-Segment 2 verified end to end on the VM on 2026-10-06: `rollout_undo` →
-`recovered`, mttr **1m11.02s**, `logBytes=0 eventCount=9`, 7 audit lines
-written to the PVC. Segments 3–5 not yet dry-run on the VM.
+All four live segments dry-run on the VM, 2026-10-06:
+
+| Segment | Result | Measured |
+|---|---|---|
+| 2 · W2 happy path | `rollout_undo` → `recovered` | mttr **1m11.02s**, visible at +90s |
+| 3 · W3 rollback | `rollout_undo` → `rolled_back` | mttr **36.7s**, visible at +84s |
+| 4 · exhaust | 3 attempts → `exhausted` | **4m54s** end to end |
+| 5 · W1 unaided | Ready, 3 restarts, controller off | **47s** |
+
+`logBytes=0 eventCount=9` reproduced. Audit lines land in the PVC correctly.
 
 ---
 
@@ -162,84 +169,66 @@ Then: *"Everything after this is live on a real cluster."*
 
 ---
 
-## SEGMENT 2 — Happy path · 0:40–2:15
+## SEGMENTS 2 + 3 — run them from ONE scale-up · 0:40–2:20
 
-**Budget 95 seconds, not 80.** Dry-run on the VM 2026-10-06: scale-up at
-08:28:06, detection at +19s, `recovered` at +90s. The original 0:40–2:00 slot
-overruns. Either take the extra fifteen seconds here or trim segment 6.
+**This is a change from the original plan, and the dry run is why.** Staging
+W3 live costs about 1m45s — you must wait for revision 1 to crash-loop before
+you can patch revision 2 — and that does not fit inside a sixty-second slot
+with anything to look at.
 
-**Terminal 1** — start the log stream:
+So **stage W2 and W3 both during pre-flight**, and scale the controller up
+**once**. They are independent Deployments, the in-flight guard is keyed per
+Deployment, and both are remediated concurrently. Verified on kind across five
+repetitions and on the VM.
+
+It is also a better demo: two unrelated failures, handled at the same time,
+without the operator choosing between them.
+
+### Terminal layout for this
+
+Two log streams, each filtered to one workload, side by side:
 
 ```bash
+# Terminal 1 — the happy path
 kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f \
-  | grep -E 'DETECTED|Collected|remediation finished'
+  | grep --line-buffered -E 'DETECTED|Collected|remediation finished' | grep --line-buffered fixable
+
+# Terminal 2 — the rollback
+kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f \
+  | grep --line-buffered -E 'DETECTED|remediation finished' | grep --line-buffered unrecoverable
 ```
 
-**Terminal 3** — the live moment:
+### The live moment
 
 ```bash
 kubectl scale -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager --replicas=1
 ```
 
-Say: *"The deployment is already failing — somebody shipped a bad revision.
-I'm starting the controller now."*
+> "Two deployments are already failing. One of them has a good revision to go
+> back to; the other doesn't. I'm starting the controller now — it has never
+> seen either of them."
 
-**What you will see, and when:**
+### What happens, measured on the VM
 
-| ~Time | Output | Say |
-|---|---|---|
-| +19s | `DETECTED CrashLoopBackOff` | "It found it." |
-| +20s | `Collected incident evidence ... logBytes=0 eventCount=9` | **"Zero log bytes. This container dies silently. It's classified purely on Kubernetes events — a rollout happened right before the crash."** |
-| +90s | `remediation finished ... action=rollout_undo result=recovered mttr=1m11s` | "Recovered. And of that seventy-one seconds, sixty are the verification window — we deliberately wait to be sure." |
+| ~Time | Terminal | Output | Say |
+|---|---|---|---|
+| +19–42s | both | `DETECTED CrashLoopBackOff` | "Found both." |
+| +20s | 1 | `Collected incident evidence ... logBytes=0 eventCount=9` | **"Zero log bytes — this container dies silently. It is classified purely on Kubernetes events: a rollout happened immediately before the crash."** |
+| **+84s** | 2 | `remediation finished ... result=rolled_back mttr=36.7s` | **"There's the one that matters. It applied the fix, watched for thirty seconds, the pod never became Ready — so it restored the deployment exactly as it was and recorded a failure. It did not claim success."** |
+| **+90s** | 1 | `remediation finished ... result=recovered mttr=1m11s` | "And that one genuinely recovered. Seventy-one seconds, of which sixty are the verification window — we wait on purpose." |
 
-All three observed on the VM, 2026-10-06. On kind the mttr is ~1m5s; the VM
-runs about six seconds slower. Quote whichever cluster you are actually on.
+**The rollback lands first.** Lead with it; it is the contribution.
 
-**Terminal 2** shows the replacement pod going `1/1 Running`.
-
-The `logBytes=0` line is the best unscripted moment you have. Point at it.
-
----
-
-## SEGMENT 3 — Rollback · 2:00–3:00 · **this is the contribution**
-
-Stage W3 while you talk. Say: *"Now the case the project actually exists for
-— what happens when the fix doesn't work."*
-
-**Terminal 3:**
-
-```bash
-kubectl delete deploy rollout-fixable-demo --wait=false
-kubectl scale -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager --replicas=0
-kubectl wait --for=delete pod -n k8s-selfheal-system -l control-plane=controller-manager --timeout=60s
-
-# both revisions broken, on purpose
-sed 's/"echo bad-2; exit 1"/"echo bad-1; exit 1"/' hack/manifests/rollout-unrecoverable.yaml | kubectl apply -f -
-kubectl wait --for=jsonpath='{.status.unavailableReplicas}'=1 deploy/rollout-unrecoverable-demo --timeout=90s
-kubectl patch deployment rollout-unrecoverable-demo --type=json -p \
-  '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","echo bad-2; exit 1"]}]'
-
-kubectl scale -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager --replicas=1
-```
-
-**What you will see:**
-
-| ~Time | Output | Say |
-|---|---|---|
-| +15s | `DETECTED` then `Collected incident evidence` | "Same detection path." |
-| +45s | `remediation finished ... result=rolled_back` | **"There it is. It applied the fix, watched for thirty seconds, the pod never became Ready, so it put the deployment back exactly as it was and recorded a failure. It did not claim success."** |
-
-**Rollback fires in ~30s, not 4m33s.** That number is the full three-attempt
-exhaust. Do not let anyone conflate them — if asked, say so immediately.
-
----
+Detection latency varied between **+19s and +42s** across dry runs, so do not
+promise a number out loud. Say "within about a minute" and let it arrive.
 
 ## SEGMENT 4 — Knowing when to stop · 3:00–3:40
 
 Do **not** wait for this live. Switch to **Terminal 4**.
 
-> "If I let that run, it tries three times and then stops permanently. That
-> takes four and a half minutes, so here it is from an archived run."
+> "If I let that run, it tries three times and then stops permanently. End to
+> end that is just under five minutes — measured at 4m54s on this cluster — so
+> here it is from an archived run."
 
 ```bash
 python3 - <<'EOF'
