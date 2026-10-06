@@ -27,6 +27,61 @@ failing. I'm starting the controller now."*
 
 ---
 
+## WHICH CLUSTER — decide before pre-flight
+
+| | VM (K3s) | kind (local) |
+|---|---|---|
+| Build | `k8s-selfheal:classifier-cost-46` | `controller:v0.3.0` (current `main`) |
+| Matches the results table | **Yes** — it produced the 28 runs | No, three merges newer |
+| Grafana | **Yes** | No |
+| Attempt budget present | Yes, proven by `exhausted` in C1-01..05 | Yes |
+| Rehearsed on | Not yet | Yes |
+
+**Prefer the VM** — demo and results then come from the same binary, which is
+the first consistency an examiner checks. **Switch to kind without hesitation**
+if the tunnel is flaky or you have not managed a full dry run there. A
+rehearsed demo on a cluster you control beats a consistent one you have driven
+once.
+
+**Do not redeploy `main` to the VM.** That build produced the results; changing
+it the night before breaks the correspondence and buys nothing.
+
+### Connecting to the VM
+
+The K3s API is not publicly reachable, so everything goes through an SSH
+tunnel. **Terminal A stays open all evening — it *is* the tunnel:**
+
+```bash
+ssh -N -L 6443:127.0.0.1:6443 <username>@20.219.66.205
+```
+
+Every other terminal:
+
+```bash
+export KUBECONFIG=~/.kube/k3s-arya.yaml
+kubectl get nodes          # proves the tunnel is up
+```
+
+Keep `KUBECONFIG` exported per-terminal rather than globally, so the kind
+fallback stays reachable in any shell that has not set it.
+
+Two failures and their fixes:
+
+- `x509: certificate is valid for ...` → the kubeconfig `server:` must be
+  `https://127.0.0.1:6443`, not the public IP. Edit it.
+- `connection refused` → the tunnel died. Look at Terminal A, re-run it.
+
+### What differs on the VM
+
+- **No `kind load`** — the image is already on the node. Skip any build step.
+- The audit PVC exists but its live files were emptied after the Week 3
+  export, so it starts clean. That is expected.
+- Segment 4 reads from the archived 28-run dataset, not from `runs/A-01` —
+  use `runs/C1-01/audit.jsonl`, which is a real W3-enabled run that reached
+  `exhausted`.
+
+---
+
 ## PRE-FLIGHT — 45 minutes before, not 5
 
 Run every line. Stop at the first thing that doesn't match.
@@ -168,10 +223,10 @@ Do **not** wait for this live. Switch to **Terminal 4**.
 python3 - <<'EOF'
 import json,collections
 inc=collections.defaultdict(list)
-for l in open('runs/A-01/audit.jsonl'):
+for l in open('runs/C1-01/audit.jsonl'):   # VM dataset; use runs/A-01 on kind
     d=json.loads(l); inc[d['incidentID'][:8]].append(d)
 for k,v in inc.items():
-    if 'unrecoverable' in v[-1].get('pod',''):
+    if 'unrecoverable' in v[-1].get('pod',''):   # W3
         for d in v:
             if d['state'] in ('LOGGED',):
                 print(f"attempt {d['attemptNumber']}  {d['result']}")
