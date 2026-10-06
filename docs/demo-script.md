@@ -79,6 +79,21 @@ Two failures and their fixes:
 - Segment 4 reads from the archived 28-run dataset, not from `runs/A-01` —
   use `runs/C1-01/audit.jsonl`, which is a real W3-enabled run that reached
   `exhausted`.
+- **The VM audit schema has seven fields, not nine** — no `workload`, no
+  `armLabel`, because that build predates those flags:
+  `timestamp · pod · state · action · result · incidentID · attemptNumber`.
+  This is the same schema as the 28-run dataset, which is the point: demo and
+  results come from one binary.
+- Online Boutique, Chaos Mesh and Prometheus/Grafana all run on this cluster,
+  and Boutique occupies the `default` namespace alongside the demo workloads.
+  Harmless — the names do not collide — but `kubectl get pods` is noisy, so
+  always filter with `-l app=...`.
+
+### Dry-run status
+
+Segment 2 verified end to end on the VM on 2026-10-06: `rollout_undo` →
+`recovered`, mttr **1m11.02s**, `logBytes=0 eventCount=9`, 7 audit lines
+written to the PVC. Segments 3–5 not yet dry-run on the VM.
 
 ---
 
@@ -147,7 +162,11 @@ Then: *"Everything after this is live on a real cluster."*
 
 ---
 
-## SEGMENT 2 — Happy path · 0:40–2:00
+## SEGMENT 2 — Happy path · 0:40–2:15
+
+**Budget 95 seconds, not 80.** Dry-run on the VM 2026-10-06: scale-up at
+08:28:06, detection at +19s, `recovered` at +90s. The original 0:40–2:00 slot
+overruns. Either take the extra fifteen seconds here or trim segment 6.
 
 **Terminal 1** — start the log stream:
 
@@ -169,9 +188,12 @@ I'm starting the controller now."*
 
 | ~Time | Output | Say |
 |---|---|---|
-| +15s | `DETECTED CrashLoopBackOff` | "It found it." |
-| +15s | `Collected incident evidence ... logBytes=0 eventCount=9` | **"Zero log bytes. This container dies silently. It's classified purely on Kubernetes events — a rollout happened right before the crash."** |
-| +65s | `remediation finished ... action=rollout_undo result=recovered mttr=1m5s` | "Recovered. And the 65 seconds is almost entirely the verification window." |
+| +19s | `DETECTED CrashLoopBackOff` | "It found it." |
+| +20s | `Collected incident evidence ... logBytes=0 eventCount=9` | **"Zero log bytes. This container dies silently. It's classified purely on Kubernetes events — a rollout happened right before the crash."** |
+| +90s | `remediation finished ... action=rollout_undo result=recovered mttr=1m11s` | "Recovered. And of that seventy-one seconds, sixty are the verification window — we deliberately wait to be sure." |
+
+All three observed on the VM, 2026-10-06. On kind the mttr is ~1m5s; the VM
+runs about six seconds slower. Quote whichever cluster you are actually on.
 
 **Terminal 2** shows the replacement pod going `1/1 Running`.
 
