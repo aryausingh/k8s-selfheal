@@ -90,6 +90,8 @@ func main() {
 	var enableLeaderElection bool
 	var probeAddr string
 	var auditPath string
+	var auditWorkload string
+	var auditArmLabel string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
@@ -97,6 +99,12 @@ func main() {
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.StringVar(&auditPath, "audit-path", "", "Append audit JSONL to this file. Empty writes audit events to stdout.")
+	// Stamped onto every audit line so the metrics adapter can group runs
+	// without a side-channel. The controller cannot infer either: the
+	// experiment harness sets them per run, and restarts the manager between
+	// arms anyway.
+	flag.StringVar(&auditWorkload, "audit-workload", "", "Workload label (W1/W2/W3) stamped on every audit line.")
+	flag.StringVar(&auditArmLabel, "audit-arm", "", "Experiment arm (enabled/disabled) stamped on every audit line.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -277,6 +285,10 @@ func main() {
 		Verifier:  safety.NewVerifier(mgr.GetClient()),
 		Audit:     auditWriter,
 		Clock:     safety.RealClock{},
+		AuditMetadata: safety.AuditMetadata{
+			Workload: auditWorkload,
+			ArmLabel: auditArmLabel,
+		},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)
