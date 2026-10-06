@@ -151,6 +151,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 			}
 
 			key := incidentKey(event.Namespace, event.OwnerDeployment)
+			podRef := event.Namespace + "/" + event.PodName
 			record, decision := r.beginAttempt(key, generation, time.Now())
 			if decision == admitExhausted {
 				// Logged exactly once: beginAttempt sets the terminal outcome
@@ -159,7 +160,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 				logger.Info("EXHAUSTED — attempt budget spent, going quiet until the deployment changes",
 					"namespace", event.Namespace, "deployment", event.OwnerDeployment,
 					"incidentID", record.id, "attempts", record.attemptCount)
-				r.closeIncidentIfTerminal(ctx, key)
+				r.closeIncidentIfTerminal(ctx, key, podRef)
 			}
 			if decision != admitProceed {
 				if decision == admitSkip {
@@ -178,7 +179,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"cannot classify incident — escalating by default rather than automating blind",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
-				r.closeIncidentIfTerminal(ctx, key)
+				r.closeIncidentIfTerminal(ctx, key, podRef)
 				break
 			}
 
@@ -235,7 +236,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"fallbackUsed", classification.FallbackUsed,
 					"fallbackReason", classification.FallbackReason)
 				r.endAttempt(key, OutcomeEscalated, time.Now())
-				r.closeIncidentIfTerminal(ctx, key)
+				r.closeIncidentIfTerminal(ctx, key, podRef)
 				break
 			}
 
@@ -249,7 +250,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					"classifier recommended an action with no matching implementation — escalating instead",
 					"namespace", event.Namespace, "pod", event.PodName)
 				r.endAttempt(key, OutcomeRejected, time.Now())
-				r.closeIncidentIfTerminal(ctx, key)
+				r.closeIncidentIfTerminal(ctx, key, podRef)
 				break
 			}
 
@@ -284,7 +285,7 @@ func (r *PodReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 					// No-op unless this attempt ended the incident: a
 					// rolled_back attempt with budget left leaves it active
 					// and the next reconcile retries under backoff.
-					r.closeIncidentIfTerminal(r.ManagerCtx, key)
+					r.closeIncidentIfTerminal(r.ManagerCtx, key, podRef)
 				}()
 
 				outcome, err := service.Remediate(r.ManagerCtx, event)

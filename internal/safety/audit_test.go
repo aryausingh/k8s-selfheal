@@ -57,6 +57,7 @@ func TestJSONLAuditWriterAppendsOneValidObjectPerLine(t *testing.T) {
 			"incidentID",
 			"attemptNumber",
 			"timestamp",
+			"pod",
 			"state",
 			"action",
 			"result",
@@ -67,8 +68,8 @@ func TestJSONLAuditWriterAppendsOneValidObjectPerLine(t *testing.T) {
 				t.Errorf("line %d is missing field %q", index, field)
 			}
 		}
-		if len(decoded) != 8 {
-			t.Errorf("line %d has %d fields, want exactly 8", index, len(decoded))
+		if len(decoded) != 9 {
+			t.Errorf("line %d has %d fields, want exactly 9", index, len(decoded))
 		}
 	}
 }
