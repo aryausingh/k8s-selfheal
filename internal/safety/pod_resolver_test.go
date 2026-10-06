@@ -22,10 +22,10 @@ func TestDeploymentPodResolverSelectsPostActionReplacement(t *testing.T) {
 	resolver := &DeploymentPodResolver{Reader: fakeClientWithObjects(t, objects...)}
 
 	pod, err := resolver.Resolve(context.Background(), VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		ActionStartedAt: actionStartedAt,
+		OriginalPod:      types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		PreActionPodUIDs: PodUIDSet{},
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
@@ -48,10 +48,10 @@ func TestDeploymentPodResolverDoesNotUseOriginalPod(t *testing.T) {
 	resolver := &DeploymentPodResolver{Reader: fakeClientWithObjects(t, deployment, replicaSet, original)}
 
 	_, err := resolver.Resolve(context.Background(), VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		ActionStartedAt: actionStartedAt,
+		OriginalPod:      types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		PreActionPodUIDs: PodUIDSet{types.UID("original-uid"): {}},
 	})
 	if !errors.Is(err, ErrDeploymentPodNotFound) {
 		t.Fatalf("Resolve() error = %v, want ErrDeploymentPodNotFound", err)
@@ -62,16 +62,15 @@ func TestDeploymentPodResolverRejectsPreActionAndForeignPods(t *testing.T) {
 	actionStartedAt := time.Unix(100, 0)
 	objects := deploymentPodObjects(actionStartedAt)
 	deployment, replicaSet, preAction, foreign := objects[0], objects[1], objects[2], objects[3]
-	preAction.(*corev1.Pod).CreationTimestamp = metav1.NewTime(actionStartedAt.Add(-time.Second))
 	resolver := &DeploymentPodResolver{
 		Reader: fakeClientWithObjects(t, deployment, replicaSet, preAction, foreign),
 	}
 
 	_, err := resolver.Resolve(context.Background(), VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		ActionStartedAt: actionStartedAt,
+		OriginalPod:      types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		PreActionPodUIDs: PodUIDSet{types.UID("replacement-uid"): {}},
 	})
 	if !errors.Is(err, ErrDeploymentPodNotFound) {
 		t.Fatalf("Resolve() error = %v, want ErrDeploymentPodNotFound", err)
@@ -183,10 +182,10 @@ func TestDeploymentPodResolverAcceptsReplacementCreatedInTheSameSecond(t *testin
 	}
 
 	pod, err := resolver.Resolve(context.Background(), VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		ActionStartedAt: actionStartedAt,
+		OriginalPod:      types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		PreActionPodUIDs: PodUIDSet{},
 	})
 	if err != nil {
 		t.Fatalf("Resolve() error = %v, want the same-second replacement", err)
@@ -196,25 +195,46 @@ func TestDeploymentPodResolverAcceptsReplacementCreatedInTheSameSecond(t *testin
 	}
 }
 
-// A Pod from the previous second is still genuinely pre-action: the tolerance
-// is exactly one second wide, not unbounded.
-func TestDeploymentPodResolverStillRejectsPodFromThePreviousSecond(t *testing.T) {
+// UID attribution rejects a Pod captured before the action even when its
+// second-level API timestamp is indistinguishable from a valid replacement.
+func TestDeploymentPodResolverRejectsCapturedUIDFromTheSameSecond(t *testing.T) {
 	actionStartedAt := time.Unix(100, 516018000)
 	objects := deploymentPodObjects(actionStartedAt)
 	deployment, replicaSet, replacement := objects[0], objects[1], objects[2]
-	replacement.(*corev1.Pod).CreationTimestamp = metav1.NewTime(time.Unix(99, 0))
+	replacement.(*corev1.Pod).CreationTimestamp = metav1.NewTime(time.Unix(100, 0))
 
 	resolver := &DeploymentPodResolver{
 		Reader: fakeClientWithObjects(t, deployment, replicaSet, replacement),
 	}
 
 	_, err := resolver.Resolve(context.Background(), VerificationTarget{
-		OriginalPod:     types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
-		Deployment:      types.NamespacedName{Name: "checkout", Namespace: "shop"},
-		ContainerName:   "app",
-		ActionStartedAt: actionStartedAt,
+		OriginalPod:      types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:       types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName:    "app",
+		PreActionPodUIDs: PodUIDSet{types.UID("replacement-uid"): {}},
 	})
 	if !errors.Is(err, ErrDeploymentPodNotFound) {
 		t.Fatalf("Resolve() error = %v, want ErrDeploymentPodNotFound", err)
+	}
+}
+
+func TestDeploymentPodResolverCapturesOnlyDeploymentOwnedPodUIDs(t *testing.T) {
+	actionStartedAt := time.Unix(100, 0)
+	objects := deploymentPodObjects(actionStartedAt)
+	resolver := &DeploymentPodResolver{Reader: fakeClientWithObjects(t, objects...)}
+
+	uids, err := resolver.CapturePreActionPodUIDs(context.Background(), VerificationTarget{
+		OriginalPod:   types.NamespacedName{Name: "checkout-old", Namespace: "shop"},
+		Deployment:    types.NamespacedName{Name: "checkout", Namespace: "shop"},
+		ContainerName: "app",
+	})
+	if err != nil {
+		t.Fatalf("CapturePreActionPodUIDs() error = %v", err)
+	}
+	if _, ok := uids[types.UID("replacement-uid")]; !ok {
+		t.Fatal("Deployment-owned pod UID was not captured")
+	}
+	if _, ok := uids[types.UID("foreign-pod-uid")]; ok {
+		t.Fatal("foreign pod UID was captured")
 	}
 }

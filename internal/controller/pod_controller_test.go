@@ -631,18 +631,19 @@ func TestIncident_BackoffRunsFromAttemptEndNotAttemptStart(t *testing.T) {
 	}
 }
 
-// --- the CLOSED incident audit line (Week 3, Owner 3 metrics adapter) -----
+// --- terminal incident audit lines (Week 3, Owner 3 metrics adapter) ------
 
-func TestIncident_EscalationWritesAClosedAuditLine(t *testing.T) {
+func TestIncident_EscalationWritesATerminalLoggedLine(t *testing.T) {
 	// escalated is decided before Remediate() runs, so Owner 2's Service
-	// never writes anything for it. Without the CLOSED line the metrics
+	// never writes anything for it. Without this LOGGED line the metrics
 	// adapter cannot see the incident at all.
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		Classifier: &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
-		Audit:      audit,
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier:    &capturingClassifier{outcome: classifier.ClassificationOutcome{Proposal: escalateProposal()}},
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, _ := newTestContext()
 
@@ -650,34 +651,40 @@ func TestIncident_EscalationWritesAClosedAuditLine(t *testing.T) {
 		t.Fatalf("expected no error, got %v", err)
 	}
 
-	closed := audit.closedLines()
-	if len(closed) != 1 {
-		t.Fatalf("expected exactly one CLOSED line, got %d", len(closed))
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 {
+		t.Fatalf("expected exactly one terminal LOGGED line, got %d", len(terminal))
 	}
-	if closed[0].Result != OutcomeEscalated {
-		t.Errorf("result = %q, want %q", closed[0].Result, OutcomeEscalated)
+	if terminal[0].Result != OutcomeEscalated {
+		t.Errorf("result = %q, want %q", terminal[0].Result, OutcomeEscalated)
 	}
-	if closed[0].AttemptNumber != 0 {
-		t.Errorf("attemptNumber = %d, want 0 — escalation consumes no budget", closed[0].AttemptNumber)
+	if terminal[0].AttemptNumber != 0 {
+		t.Errorf("attemptNumber = %d, want 0 — escalation consumes no budget", terminal[0].AttemptNumber)
 	}
-	if closed[0].IncidentID == "" {
-		t.Error("the CLOSED line must carry an incidentID; the adapter groups on it")
+	if terminal[0].IncidentID == "" {
+		t.Error("the terminal line must carry an incidentID; the adapter groups on it")
 	}
-	if closed[0].Pod != testNamespace+"/"+testPodName {
-		t.Errorf("pod = %q, want %q", closed[0].Pod, testNamespace+"/"+testPodName)
+	if terminal[0].State != safety.StateLogged || terminal[0].Action != "" {
+		t.Errorf("state/action = %q/%q, want LOGGED with no dispatched action", terminal[0].State, terminal[0].Action)
+	}
+	if terminal[0].Workload != "W2" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("terminal metadata = %q/%q, want W2/enabled", terminal[0].Workload, terminal[0].ArmLabel)
 	}
 }
 
-func TestIncident_ExhaustionWritesAClosedAuditLine(t *testing.T) {
+func TestIncident_ExhaustionWritesATerminalLoggedLine(t *testing.T) {
 	audit := &stubAuditWriter{}
-	r := &PodReconciler{Audit: audit}
+	r := &PodReconciler{
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W3", ArmLabel: "enabled"},
+	}
 	key := incidentKey("ns1", "dep1")
 	start := time.Now()
 
 	for i := 1; i <= MaxAttempts; i++ {
 		drive(r, key, 1, start.Add(time.Duration(i)*10*time.Minute), string(safety.OutcomeRolledBack))
 	}
-	if len(audit.closedLines()) != 0 {
+	if len(audit.terminalLines()) != 0 {
 		t.Fatal("a rolled_back attempt with budget left must not close the incident")
 	}
 
@@ -685,36 +692,19 @@ func TestIncident_ExhaustionWritesAClosedAuditLine(t *testing.T) {
 	if _, decision := r.beginAttempt(key, 1, start.Add(time.Hour)); decision != admitExhausted {
 		t.Fatalf("setup: expected the budget to be spent")
 	}
-	r.closeIncidentIfTerminal(ctx, key, "ns1/pod-x", "")
+	r.closeIncidentIfTerminal(ctx, key)
 
-	closed := audit.closedLines()
-	if len(closed) != 1 {
-		t.Fatalf("expected exactly one CLOSED line, got %d", len(closed))
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 {
+		t.Fatalf("expected exactly one terminal LOGGED line, got %d", len(terminal))
 	}
-	if closed[0].Result != OutcomeExhausted {
-		t.Errorf("result = %q, want %q", closed[0].Result, OutcomeExhausted)
+	if terminal[0].Result != OutcomeExhausted {
+		t.Errorf("result = %q, want %q", terminal[0].Result, OutcomeExhausted)
 	}
-	if closed[0].AttemptNumber != MaxAttempts {
-		t.Errorf("attemptNumber = %d, want %d", closed[0].AttemptNumber, MaxAttempts)
+	if terminal[0].AttemptNumber != MaxAttempts {
+		t.Errorf("attemptNumber = %d, want %d", terminal[0].AttemptNumber, MaxAttempts)
 	}
-}
-
-func TestIncident_ClassifierDurationRidesOnTheClosedLine(t *testing.T) {
-	audit := &stubAuditWriter{}
-	r := &PodReconciler{Audit: audit}
-	key := incidentKey("ns1", "dep1")
-	ctx, _ := newTestContext()
-
-	r.beginAttempt(key, 1, time.Now())
-	r.setClassifierDuration(key, 1500*time.Millisecond)
-	r.endAttempt(key, OutcomeEscalated, time.Now())
-	r.closeIncidentIfTerminal(ctx, key, "ns1/pod-x", "")
-
-	closed := audit.closedLines()
-	if len(closed) != 1 {
-		t.Fatalf("expected one CLOSED line, got %d", len(closed))
-	}
-	if closed[0].ClassifierMillis != 1500 {
-		t.Errorf("classifierMillis = %d, want 1500 — t_classify is read off this line", closed[0].ClassifierMillis)
+	if terminal[0].Workload != "W3" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("terminal metadata = %q/%q, want W3/enabled", terminal[0].Workload, terminal[0].ArmLabel)
 	}
 }

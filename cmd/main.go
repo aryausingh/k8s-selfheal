@@ -89,12 +89,14 @@ func main() {
 	var webhookCertPath, webhookCertName, webhookCertKey string
 	var enableLeaderElection bool
 	var probeAddr string
+	var auditPath string
 	var secureMetrics bool
 	var enableHTTP2 bool
 	var tlsOpts []func(*tls.Config)
 	flag.StringVar(&metricsAddr, "metrics-bind-address", "0", "The address the metrics endpoint binds to. "+
 		"Use :8443 for HTTPS or :8080 for HTTP, or leave as 0 to disable the metrics service.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
+	flag.StringVar(&auditPath, "audit-path", "", "Append audit JSONL to this file. Empty writes audit events to stdout.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election for controller manager. "+
 			"Enabling this will ensure there is only one active controller manager.")
@@ -237,6 +239,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	auditWriter := safety.AuditWriter(safety.NewJSONLAuditWriter(os.Stdout))
+	if auditPath != "" {
+		fileAuditWriter, auditErr := safety.NewJSONLFileAuditWriter(auditPath)
+		if auditErr != nil {
+			setupLog.Error(auditErr, "Unable to initialize durable audit sink", "path", auditPath)
+			os.Exit(1)
+		}
+		defer func() {
+			if closeErr := fileAuditWriter.Close(); closeErr != nil {
+				setupLog.Error(closeErr, "Unable to close durable audit sink", "path", auditPath)
+			}
+		}()
+		auditWriter = fileAuditWriter
+		setupLog.Info("Using durable audit sink", "path", auditPath)
+	}
+
 	// +kubebuilder:scaffold:builder
 	if err = (&controller.PodReconciler{
 		Client:     mgr.GetClient(),
@@ -257,12 +275,8 @@ func main() {
 		},
 		Snapshots: &safety.KubernetesSnapshotStore{Client: mgr.GetClient()},
 		Verifier:  safety.NewVerifier(mgr.GetClient()),
-		// Audit goes to stdout for now — there's no dedicated audit sink yet
-		// (that's Owner 3's Grafana/reporting track). This is an interim
-		// choice worth confirming once that track lands, not a frozen
-		// contract like the others above.
-		Audit: safety.NewJSONLAuditWriter(os.Stdout),
-		Clock: safety.RealClock{},
+		Audit:     auditWriter,
+		Clock:     safety.RealClock{},
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "unable to create controller", "controller", "Pod")
 		os.Exit(1)

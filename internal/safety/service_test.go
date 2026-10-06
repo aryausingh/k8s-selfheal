@@ -38,11 +38,13 @@ func (s *trackingSnapshotStore) Restore(context.Context, DeploymentSnapshot) err
 
 // FAKE REMEDIATION ACTION
 type checkingAction struct {
-	store   *trackingSnapshotStore
-	called  bool
-	calls   int
-	name    string
-	execErr error
+	store                 *trackingSnapshotStore
+	preActionUIDsCaptured func() bool
+	called                bool
+	calls                 int
+	name                  string
+	execErr               error
+	onExecute             func()
 }
 
 func (a *checkingAction) Name() string {
@@ -53,9 +55,117 @@ func (a *checkingAction) Execute(context.Context, DetectionEvent) error {
 	if !a.store.captured {
 		return fmt.Errorf("action ran before snapshot")
 	}
+	if a.preActionUIDsCaptured != nil && !a.preActionUIDsCaptured() {
+		return fmt.Errorf("action ran before pre-action pod UIDs were captured")
+	}
 	a.called = true
 	a.calls++
+	if a.onExecute != nil {
+		a.onExecute()
+	}
 	return a.execErr
+}
+
+type orderingVerifier struct {
+	captured bool
+}
+
+func (v *orderingVerifier) CapturePreActionPodUIDs(
+	context.Context,
+	VerificationTarget,
+) (PodUIDSet, error) {
+	v.captured = true
+	return PodUIDSet{types.UID("original-uid"): {}}, nil
+}
+
+func (v *orderingVerifier) Verify(
+	context.Context,
+	VerificationTarget,
+) (VerificationResult, error) {
+	return VerificationResult{Recovered: true}, nil
+}
+
+func TestRemediateCapturesPreActionPodUIDsBeforeAction(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	store := &trackingSnapshotStore{}
+	verifier := &orderingVerifier{}
+	action := &checkingAction{
+		store: store,
+		name:  "injected-owner1-action",
+		preActionUIDsCaptured: func() bool {
+			return verifier.captured
+		},
+	}
+	service := &Service{
+		Snapshots: store,
+		Verifier:  verifier,
+		Action:    action,
+		Audit:     NewJSONLAuditWriter(&bytes.Buffer{}),
+		Clock:     clock,
+	}
+
+	_, err := service.Remediate(context.Background(), DetectionEvent{
+		PodName:         "checkout-pod",
+		Namespace:       "shop",
+		ContainerName:   "app",
+		RestartCount:    1,
+		OwnerDeployment: "checkout",
+		Timestamp:       clock.Now(),
+		IncidentID:      "incident-ordering",
+		AttemptNumber:   1,
+	})
+	if err != nil {
+		t.Fatalf("Remediate() error = %v", err)
+	}
+	if !verifier.captured || !action.called {
+		t.Fatalf("captured/action = %t/%t, want true/true", verifier.captured, action.called)
+	}
+}
+
+func TestAuditTransitionTimestampsExposeApplyDuration(t *testing.T) {
+	clock := &fakeClock{now: time.Unix(100, 0)}
+	store := &trackingSnapshotStore{}
+	verifier := &orderingVerifier{}
+	action := &checkingAction{
+		store:     store,
+		name:      "restart_pod",
+		onExecute: func() { clock.Advance(3 * time.Second) },
+	}
+	service := &Service{
+		Snapshots: store,
+		Verifier:  verifier,
+		Action:    action,
+		Audit:     NewJSONLAuditWriter(&bytes.Buffer{}),
+		Clock:     clock,
+		Metadata:  AuditMetadata{Workload: "W1", ArmLabel: "enabled"},
+	}
+
+	outcome, err := service.Remediate(context.Background(), DetectionEvent{
+		PodName:         "checkout-pod",
+		Namespace:       "shop",
+		ContainerName:   "app",
+		RestartCount:    1,
+		OwnerDeployment: "checkout",
+		Timestamp:       clock.Now(),
+		IncidentID:      "incident-apply-timing",
+		AttemptNumber:   1,
+	})
+	if err != nil {
+		t.Fatalf("Remediate() error = %v", err)
+	}
+
+	var remediatingAt, verifyingAt time.Time
+	for _, entry := range outcome.AuditEntries {
+		switch entry.State {
+		case StateRemediating:
+			remediatingAt = entry.Timestamp
+		case StateVerifying:
+			verifyingAt = entry.Timestamp
+		}
+	}
+	if got := verifyingAt.Sub(remediatingAt); got != 3*time.Second {
+		t.Fatalf("VERIFYING - REMEDIATING = %s, want 3s", got)
+	}
 }
 
 func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
@@ -83,6 +193,7 @@ func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
 		Action:    action,
 		Audit:     NewJSONLAuditWriter(&auditOutput),
 		Clock:     clock,
+		Metadata:  AuditMetadata{Workload: "W3", ArmLabel: "enabled"},
 	}
 	// DETECTION EVENT DATA
 	event := DetectionEvent{
@@ -92,6 +203,8 @@ func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
 		RestartCount:    3,
 		OwnerDeployment: "checkout",
 		Timestamp:       clock.Now(),
+		IncidentID:      "incident-second-45",
+		AttemptNumber:   1,
 	}
 
 	outcome, err := service.Remediate(context.Background(), event)
@@ -123,6 +236,12 @@ func TestRemediateSecond45CrashFiresRollback(t *testing.T) {
 	gotStates := make([]State, 0, len(outcome.AuditEntries))
 	for _, entry := range outcome.AuditEntries {
 		gotStates = append(gotStates, entry.State)
+		if entry.IncidentID != event.IncidentID || entry.AttemptNumber != event.AttemptNumber {
+			t.Fatalf("audit identity = %q/%d, want %q/%d", entry.IncidentID, entry.AttemptNumber, event.IncidentID, event.AttemptNumber)
+		}
+		if entry.Workload != "W3" || entry.ArmLabel != "enabled" {
+			t.Fatalf("audit experiment labels = %q/%q, want W3/enabled", entry.Workload, entry.ArmLabel)
+		}
 	}
 	if !reflect.DeepEqual(gotStates, wantStates) {
 		t.Fatalf("audit states = %v, want %v", gotStates, wantStates)
@@ -158,6 +277,8 @@ func TestRemediateDoesNotRunActionWhenSnapshotFails(t *testing.T) {
 		RestartCount:    1,
 		OwnerDeployment: "checkout",
 		Timestamp:       clock.Now(),
+		IncidentID:      "incident-snapshot-failure",
+		AttemptNumber:   1,
 	})
 	if err == nil {
 		t.Fatal("Remediate() succeeded after snapshot failure")
@@ -169,6 +290,13 @@ func TestRemediateDoesNotRunActionWhenSnapshotFails(t *testing.T) {
 
 type fixedVerifier struct {
 	result VerificationResult
+}
+
+func (v fixedVerifier) CapturePreActionPodUIDs(
+	context.Context,
+	VerificationTarget,
+) (PodUIDSet, error) {
+	return PodUIDSet{types.UID("original-uid"): {}}, nil
 }
 
 func (v fixedVerifier) Verify(context.Context, VerificationTarget) (VerificationResult, error) {
@@ -194,6 +322,8 @@ func TestRemediateReturnsRecoveredOutcome(t *testing.T) {
 		RestartCount:    1,
 		OwnerDeployment: "checkout",
 		Timestamp:       clock.Now(),
+		IncidentID:      "incident-recovered",
+		AttemptNumber:   1,
 	})
 	if err != nil {
 		t.Fatalf("Remediate() error = %v", err)
@@ -208,6 +338,13 @@ func TestRemediateReturnsRecoveredOutcome(t *testing.T) {
 
 type queuedVerifier struct {
 	results []VerificationResult
+}
+
+func (v *queuedVerifier) CapturePreActionPodUIDs(
+	context.Context,
+	VerificationTarget,
+) (PodUIDSet, error) {
+	return PodUIDSet{types.UID("original-uid"): {}}, nil
 }
 
 func (v *queuedVerifier) Verify(context.Context, VerificationTarget) (VerificationResult, error) {
@@ -241,6 +378,8 @@ func TestRemediateBackToBackIncidentsDoNotShareLifecycleState(t *testing.T) {
 		RestartCount:    3,
 		OwnerDeployment: "checkout",
 		Timestamp:       clock.Now(),
+		IncidentID:      "incident-repeat",
+		AttemptNumber:   1,
 	}
 
 	first, err := service.Remediate(context.Background(), event)
@@ -298,6 +437,8 @@ func TestOutcomeMTTREndsAtTerminalStateNotLoggedState(t *testing.T) {
 		RestartCount:    3,
 		OwnerDeployment: "checkout",
 		Timestamp:       clock.Now(),
+		IncidentID:      "incident-mttr",
+		AttemptNumber:   1,
 	}
 
 	outcome, err := service.Remediate(context.Background(), event)

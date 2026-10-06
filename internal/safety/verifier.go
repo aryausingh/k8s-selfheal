@@ -20,12 +20,17 @@ const (
 // VerificationTarget contains the frozen event data needed by the verifier and
 // the time at which the injected remediation action started.
 type VerificationTarget struct {
-	OriginalPod     types.NamespacedName
-	Deployment      types.NamespacedName
-	ContainerName   string
-	RestartCount    int32
-	ActionStartedAt time.Time
+	OriginalPod      types.NamespacedName
+	Deployment       types.NamespacedName
+	ContainerName    string
+	RestartCount     int32
+	PreActionPodUIDs PodUIDSet
 }
+
+// PodUIDSet is the exact set of Deployment-owned Pods observed immediately
+// before the remediation action. Kubernetes UIDs are stable identities and do
+// not have the precision ambiguity of API-server timestamps.
+type PodUIDSet map[types.UID]struct{}
 
 // VerificationResult records whether the readiness and stability phases passed.
 type VerificationResult struct {
@@ -37,6 +42,7 @@ type VerificationResult struct {
 
 // PodResolver finds the current Pod produced by the target Deployment.
 type PodResolver interface {
+	CapturePreActionPodUIDs(context.Context, VerificationTarget) (PodUIDSet, error)
 	Resolve(context.Context, VerificationTarget) (*corev1.Pod, error)
 }
 
@@ -59,6 +65,25 @@ func NewVerifier(reader client.Reader) *Verifier {
 		Window:           StabilityWindow,
 		PollInterval:     DefaultPollInterval,
 	}
+}
+
+// CapturePreActionPodUIDs snapshots the identities that must never satisfy
+// post-action verification. Service calls this immediately before Execute.
+func (v *Verifier) CapturePreActionPodUIDs(
+	ctx context.Context,
+	target VerificationTarget,
+) (PodUIDSet, error) {
+	if v == nil || v.Resolver == nil {
+		return nil, fmt.Errorf("capture pre-action pod UIDs: resolver is required")
+	}
+	if err := validateVerificationIdentity(target); err != nil {
+		return nil, err
+	}
+	uids, err := v.Resolver.CapturePreActionPodUIDs(ctx, target)
+	if err != nil {
+		return nil, fmt.Errorf("capture pre-action pod UIDs: %w", err)
+	}
+	return uids, nil
 }
 
 // Verify allows a bounded startup period, then requires one exact Pod to remain
@@ -149,6 +174,25 @@ func (v *Verifier) validate(target VerificationTarget) error {
 	if v.Clock == nil {
 		return fmt.Errorf("verify pod: clock is required")
 	}
+	if err := validateVerificationIdentity(target); err != nil {
+		return err
+	}
+	if target.PreActionPodUIDs == nil {
+		return fmt.Errorf("verify pod: pre-action pod UID set is required")
+	}
+	if v.ReadinessTimeout <= 0 {
+		return fmt.Errorf("verify pod: readiness timeout must be positive")
+	}
+	if v.Window <= 0 {
+		return fmt.Errorf("verify pod: stability window must be positive")
+	}
+	if v.PollInterval <= 0 {
+		return fmt.Errorf("verify pod: poll interval must be positive")
+	}
+	return nil
+}
+
+func validateVerificationIdentity(target VerificationTarget) error {
 	if target.OriginalPod.Name == "" || target.OriginalPod.Namespace == "" {
 		return fmt.Errorf("verify pod: original pod name and namespace are required")
 	}
@@ -160,18 +204,6 @@ func (v *Verifier) validate(target VerificationTarget) error {
 	}
 	if target.RestartCount < 0 {
 		return fmt.Errorf("verify pod: restart count cannot be negative")
-	}
-	if target.ActionStartedAt.IsZero() {
-		return fmt.Errorf("verify pod: action start time is required")
-	}
-	if v.ReadinessTimeout <= 0 {
-		return fmt.Errorf("verify pod: readiness timeout must be positive")
-	}
-	if v.Window <= 0 {
-		return fmt.Errorf("verify pod: stability window must be positive")
-	}
-	if v.PollInterval <= 0 {
-		return fmt.Errorf("verify pod: poll interval must be positive")
 	}
 	return nil
 }

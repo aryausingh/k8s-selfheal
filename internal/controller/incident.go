@@ -53,25 +53,13 @@ type incidentRecord struct {
 	logs             string
 	events           []string
 	evidenceCaptured bool
-
-	// classifierMillis is how long the classifier call took. One value per
-	// incident, not per attempt: evidence is frozen at detection so every
-	// attempt classifies the same input.
-	classifierMillis int64
 }
-
-// stateClosed marks the single audit line that ends an incident. It is
-// deliberately not one of Owner 2's lifecycle states — her state machine
-// governs one *attempt*, and this line sits a level above it, recording how
-// the incident as a whole finished.
-const stateClosed = safety.State("CLOSED")
 
 // incidentClosure is the terminal snapshot the audit line is built from.
 type incidentClosure struct {
-	id               string
-	outcome          string
-	attempts         int
-	classifierMillis int64
+	id       string
+	outcome  string
+	attempts int
 }
 
 // admission is what beginAttempt tells Reconcile to do.
@@ -296,20 +284,6 @@ func (r *PodReconciler) freezeEvidence(key, logs string, events []string) {
 	record.evidenceCaptured = true
 }
 
-// setClassifierDuration records how long classification took for this
-// incident. Called once per admitted attempt; later attempts overwrite the
-// earlier value, which is harmless because they classify identical frozen
-// evidence.
-func (r *PodReconciler) setClassifierDuration(key string, took time.Duration) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	record := r.incidents[key]
-	if record == nil {
-		return
-	}
-	record.classifierMillis = took.Milliseconds()
-}
-
 // closedIncident reports the terminal snapshot for an incident that has just
 // finished, or false while it is still active. Read under the lock so the
 // caller never touches record fields directly.
@@ -321,52 +295,47 @@ func (r *PodReconciler) closedIncident(key string) (incidentClosure, bool) {
 		return incidentClosure{}, false
 	}
 	return incidentClosure{
-		id:               record.id,
-		outcome:          record.terminalOutcome,
-		attempts:         record.attemptCount,
-		classifierMillis: record.classifierMillis,
+		id:       record.id,
+		outcome:  record.terminalOutcome,
+		attempts: record.attemptCount,
 	}, true
 }
 
-// auditIncidentClosed writes the one CLOSED line that ends an incident.
+// auditIncidentClosed writes a LOGGED line for an incident outcome decided
+// outside Service.Remediate: exhausted, escalated, or rejected.
 //
-// Owner 2's Service only writes while Remediate() is running, so three of the
-// five terminal outcomes never reached the audit log at all: escalated and
-// rejected are decided before Remediate() is called, and exhausted is decided
-// by the budget. Without this line the metrics adapter would have to infer
-// incident outcomes by reimplementing the budget rules, which would drift the
-// moment either side changed.
-//
-// The rule it gives the adapter is one line long: group by incidentID, find
-// the CLOSED entry, read result. An incident with no CLOSED line is abandoned
-// — the workload healed itself after a failed attempt, so the crash loop
-// stopped being detected and nothing ever closed it
-// (docs/measurement-definitions.md §6a).
-func (r *PodReconciler) auditIncidentClosed(ctx context.Context, podRef, action string, closure incidentClosure) {
+// Recovered already has a LOGGED entry from Service.Remediate, while
+// rolled_back is an attempt outcome rather than an incident outcome. The
+// controller therefore only fills the three genuine gaps and does not invent
+// a second state machine above Owner 2's frozen lifecycle.
+func (r *PodReconciler) auditIncidentClosed(ctx context.Context, closure incidentClosure) {
 	if r.Audit == nil {
 		return
 	}
 	entry := safety.AuditEntry{
-		Timestamp:        time.Now(),
-		Pod:              podRef,
-		State:            stateClosed,
-		Action:           action,
-		Result:           closure.outcome,
-		IncidentID:       closure.id,
-		AttemptNumber:    closure.attempts,
-		ClassifierMillis: closure.classifierMillis,
+		IncidentID:    closure.id,
+		AttemptNumber: closure.attempts,
+		Timestamp:     time.Now(),
+		State:         safety.StateLogged,
+		Action:        "",
+		Result:        closure.outcome,
+		Workload:      r.AuditMetadata.Workload,
+		ArmLabel:      r.AuditMetadata.ArmLabel,
 	}
 	if err := r.Audit.Append(entry); err != nil {
-		log.FromContext(ctx).Error(err, "could not write the incident CLOSED audit line",
+		log.FromContext(ctx).Error(err, "could not write the terminal incident audit line",
 			"incidentID", closure.id, "outcome", closure.outcome)
 	}
 }
 
-// closeIncidentIfTerminal writes the CLOSED line when the last call ended the
-// incident, and does nothing while it is still active — a rolled_back attempt
-// with budget left is not terminal.
-func (r *PodReconciler) closeIncidentIfTerminal(ctx context.Context, key, podRef, action string) {
+// closeIncidentIfTerminal writes the missing terminal line when the last call
+// ended the incident, and does nothing for active incidents or recovered,
+// which Service.Remediate already logged.
+func (r *PodReconciler) closeIncidentIfTerminal(ctx context.Context, key string) {
 	if closure, closed := r.closedIncident(key); closed {
-		r.auditIncidentClosed(ctx, podRef, action, closure)
+		if closure.outcome == OutcomeRecovered {
+			return
+		}
+		r.auditIncidentClosed(ctx, closure)
 	}
 }

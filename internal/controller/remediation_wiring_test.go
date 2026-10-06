@@ -66,6 +66,13 @@ func (stubSnapshotStore) Restore(context.Context, safety.DeploymentSnapshot) err
 // finishes in-process rather than actually polling for 30-90s.
 type stubVerifier struct{ recovered bool }
 
+func (v stubVerifier) CapturePreActionPodUIDs(
+	context.Context,
+	safety.VerificationTarget,
+) (safety.PodUIDSet, error) {
+	return safety.PodUIDSet{types.UID("original-uid"): {}}, nil
+}
+
 func (v stubVerifier) Verify(context.Context, safety.VerificationTarget) (safety.VerificationResult, error) {
 	return safety.VerificationResult{Recovered: v.recovered}, nil
 }
@@ -82,18 +89,24 @@ func (w *stubAuditWriter) Append(entry safety.AuditEntry) error {
 	return nil
 }
 
-// closedLines returns the CLOSED entries, which mark an incident terminal.
-// Exactly one per incident, or none if the incident was abandoned.
-func (w *stubAuditWriter) closedLines() []safety.AuditEntry {
+// terminalLines returns incident-terminal LOGGED entries. A rolled_back entry
+// is an attempt outcome and therefore is deliberately excluded.
+func (w *stubAuditWriter) terminalLines() []safety.AuditEntry {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	var closed []safety.AuditEntry
+	var terminal []safety.AuditEntry
 	for _, entry := range w.entries {
-		if entry.State == stateClosed {
-			closed = append(closed, entry)
+		if entry.State == safety.StateLogged && entry.Result != string(safety.OutcomeRolledBack) {
+			terminal = append(terminal, entry)
 		}
 	}
-	return closed
+	return terminal
+}
+
+func (w *stubAuditWriter) snapshot() []safety.AuditEntry {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]safety.AuditEntry(nil), w.entries...)
 }
 
 // automateProposal builds a Proposal that passes Subhashini's validator for
@@ -177,10 +190,13 @@ func TestReconcile_Escalates_WhenNotSafeForAutomation(t *testing.T) {
 
 func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
+	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
-		Actions:    map[string]safety.RemediationAction{}, // nothing registered for "restart_pod"
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		Classifier:    stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:       map[string]safety.RemediationAction{}, // nothing registered for "restart_pod"
+		Audit:         audit,
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, sink := newTestContext()
 
@@ -192,6 +208,16 @@ func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 	if !sink.has("no matching implementation") {
 		t.Error("expected a log about the missing action, escalating instead of panicking or automating blind")
 	}
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 || terminal[0].Result != OutcomeRejected {
+		t.Fatalf("terminal audit = %+v, want one rejected LOGGED entry", terminal)
+	}
+	if terminal[0].AttemptNumber != 0 || terminal[0].Action != "" {
+		t.Errorf("rejected terminal attempt/action = %d/%q, want 0/empty", terminal[0].AttemptNumber, terminal[0].Action)
+	}
+	if terminal[0].Workload != "W2" || terminal[0].ArmLabel != "enabled" {
+		t.Errorf("rejected terminal metadata = %q/%q, want W2/enabled", terminal[0].Workload, terminal[0].ArmLabel)
+	}
 	waitForGuardCleared(t, r)
 }
 
@@ -200,15 +226,17 @@ func TestReconcile_Escalates_WhenNoMatchingActionRegistered(t *testing.T) {
 func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	deploy, rs, pod := ownedPod(crashingContainerStatus("main", 3))
 	action := &stubRemediationAction{name: classifier.ActionRestartPod, called: make(chan contracts.DetectionEvent, 1)}
+	audit := &stubAuditWriter{}
 	r := &PodReconciler{
-		Client:     fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
-		ManagerCtx: context.Background(),
-		Classifier: stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
-		Actions:    map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
-		Snapshots:  stubSnapshotStore{},
-		Verifier:   stubVerifier{recovered: true},
-		Audit:      &stubAuditWriter{},
-		Clock:      safety.RealClock{},
+		Client:        fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(deploy, rs, pod).Build(),
+		ManagerCtx:    context.Background(),
+		Classifier:    stubIncidentClassifier{outcome: classifier.ClassificationOutcome{Proposal: automateProposal()}},
+		Actions:       map[string]safety.RemediationAction{classifier.ActionRestartPod: action},
+		Snapshots:     stubSnapshotStore{},
+		Verifier:      stubVerifier{recovered: true},
+		Audit:         audit,
+		Clock:         safety.RealClock{},
+		AuditMetadata: safety.AuditMetadata{Workload: "W2", ArmLabel: "enabled"},
 	}
 	ctx, sink := newTestContext()
 
@@ -231,6 +259,15 @@ func TestReconcile_DispatchesRemediation_WhenSafeForAutomation(t *testing.T) {
 	}
 
 	waitForGuardCleared(t, r)
+	for _, entry := range audit.snapshot() {
+		if entry.Workload != "W2" || entry.ArmLabel != "enabled" {
+			t.Fatalf("audit metadata = %q/%q, want W2/enabled", entry.Workload, entry.ArmLabel)
+		}
+	}
+	terminal := audit.terminalLines()
+	if len(terminal) != 1 || terminal[0].Result != string(safety.OutcomeRecovered) {
+		t.Fatalf("terminal audit = %+v, want exactly the Service's recovered LOGGED entry", terminal)
+	}
 	if sink.has(escalatedMsg) {
 		t.Error("a safe-for-automation proposal must not be escalated")
 	}

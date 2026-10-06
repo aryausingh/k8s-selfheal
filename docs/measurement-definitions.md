@@ -118,56 +118,41 @@ parses them positionally by name.
 
 | Field | Type | Written by |
 |---|---|---|
+| `incidentID` | string | operator |
+| `attemptNumber` | int | operator |
 | `timestamp` | RFC3339 | safety |
-| `pod` | string (`namespace/name`) | safety |
 | `state` | string | safety |
 | `action` | string | safety |
 | `result` | string | safety |
-| `incidentID` | string | operator |
-| `attemptNumber` | int | operator |
-| `classifierMillis` | int64 | operator, CLOSED line only |
+| `workload` | string (`W1`/`W2`/`W3`) | run harness |
+| `armLabel` | string (`enabled`/`disabled`) | run harness |
 
-`incidentID`, `attemptNumber` and `classifierMillis` are `omitempty`, so every
-line Owner 2's `Service.Remediate` already wrote serialises unchanged.
+The schema is exact: shared audit lines do not add `pod`, `classifierMillis`,
+or Owner 3's snake_case aggregate fields. Fault-injection time and classifier
+start/completion timing remain owned by the harness and classifier
+instrumentation and are joined by the metrics adapter.
 
-### The CLOSED line
+### Terminal outcomes decided outside Remediate
 
-Owner 2's `Service` only writes while `Remediate()` is running, so three of
-the five terminal outcomes never reached the audit log: `escalated` and
-`rejected` are decided before `Remediate()` is called, and `exhausted` is
-decided by the attempt budget. The operator therefore writes **one extra line
-per incident** when it terminates:
+Owner 2's `Service` writes the complete attempt lifecycle, including the
+existing `LOGGED` records for `recovered` and `rolled_back`. Three incident
+outcomes are decided by the controller outside `Remediate`: `escalated`,
+`rejected`, and `exhausted`. The controller appends one shared-schema line for
+those missing outcomes:
 
 ```json
-{"state":"CLOSED","result":"exhausted","attemptNumber":3,"incidentID":"...","classifierMillis":412}
+{"incidentID":"...","attemptNumber":3,"timestamp":"...","state":"LOGGED","action":"","result":"exhausted","workload":"W3","armLabel":"enabled"}
 ```
 
-- `result` is one of `recovered` · `exhausted` · `escalated` · `rejected`.
-- `rolled_back` never appears here — it is an **attempt** outcome. Owner 2's
-  per-attempt `LOGGED` lines carry it and are unchanged.
+- No new lifecycle state is introduced; `state` remains `LOGGED`.
+- `result` is `exhausted`, `escalated`, or `rejected` on these controller
+  records.
 - `attemptNumber` is the attempts consumed: `0` for `escalated` and
-  `rejected`, which take no action.
-- **No CLOSED line means the incident was `abandoned`** (§6a).
-
-Adapter rule, in one line: group by `incidentID`, find the `CLOSED` entry,
-read `result`.
-
-### `workload`, `armLabel` and the injection time are per-run, not per-line
-
-These three are **not** audit fields. The controller cannot know them, and the
-disabled arm produces no audit lines at all — so an in-line `armLabel` could
-only ever read `enabled` and would carry no information.
-
-Each run is archived as its own directory instead:
-
-```
-runs/B1-03/audit.jsonl
-runs/B1-03/meta.json    {"workload":"W2","arm":"enabled","injectedAt":"...","run":3}
-```
-
-`TTD = DETECTED.timestamp − meta.injectedAt`, with no join key needed. The
-controller is restarted between arms anyway, so one log per run falls out of
-the procedure already in the runbook.
+  `rejected`; `exhausted` carries the consumed budget (`3`).
+- `action` is empty because these terminal records dispatch no Kubernetes
+  action.
+- A `rolled_back` `LOGGED` entry remains an attempt outcome, not an incident
+  terminal outcome.
 
 ## 6a. Abandoned incidents
 

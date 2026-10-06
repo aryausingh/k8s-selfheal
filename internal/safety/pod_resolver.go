@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"slices"
-	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -29,58 +28,14 @@ func (r *DeploymentPodResolver) Resolve(
 	ctx context.Context,
 	target VerificationTarget,
 ) (*corev1.Pod, error) {
-	if r.Reader == nil {
-		return nil, fmt.Errorf("resolve deployment pod: Kubernetes reader is required")
-	}
-
-	deployment := &appsv1.Deployment{}
-	if err := r.Reader.Get(ctx, target.Deployment, deployment); err != nil {
-		return nil, fmt.Errorf(
-			"read deployment %s/%s: %w",
-			target.Deployment.Namespace,
-			target.Deployment.Name,
-			err,
-		)
-	}
-	if deployment.Spec.Selector == nil {
-		return nil, fmt.Errorf("resolve deployment pod: deployment selector is required")
-	}
-
-	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	pods, ownedReplicaSets, err := r.deploymentPods(ctx, target)
 	if err != nil {
-		return nil, fmt.Errorf("resolve deployment pod: invalid deployment selector: %w", err)
+		return nil, err
 	}
 
-	replicaSets := &appsv1.ReplicaSetList{}
-	if err := r.Reader.List(
-		ctx,
-		replicaSets,
-		client.InNamespace(target.Deployment.Namespace),
-		client.MatchingLabelsSelector{Selector: selector},
-	); err != nil {
-		return nil, fmt.Errorf("list deployment ReplicaSets: %w", err)
-	}
-	ownedReplicaSets := make(map[string]struct{}, len(replicaSets.Items))
-	for index := range replicaSets.Items {
-		replicaSet := &replicaSets.Items[index]
-		if metav1.IsControlledBy(replicaSet, deployment) {
-			ownedReplicaSets[string(replicaSet.UID)] = struct{}{}
-		}
-	}
-
-	pods := &corev1.PodList{}
-	if err := r.Reader.List(
-		ctx,
-		pods,
-		client.InNamespace(target.Deployment.Namespace),
-		client.MatchingLabelsSelector{Selector: selector},
-	); err != nil {
-		return nil, fmt.Errorf("list deployment Pods: %w", err)
-	}
-
-	candidates := make([]*corev1.Pod, 0, len(pods.Items))
-	for index := range pods.Items {
-		pod := &pods.Items[index]
+	candidates := make([]*corev1.Pod, 0, len(pods))
+	for index := range pods {
+		pod := &pods[index]
 		if !eligibleDeploymentPod(pod, ownedReplicaSets, target) {
 			continue
 		}
@@ -109,6 +64,90 @@ func (r *DeploymentPodResolver) Resolve(
 	return candidates[0].DeepCopy(), nil
 }
 
+// CapturePreActionPodUIDs records every Pod currently controlled by the
+// Deployment. The immutable set is captured immediately before Execute and is
+// later used to exclude all pre-existing Pods without relying on timestamps.
+func (r *DeploymentPodResolver) CapturePreActionPodUIDs(
+	ctx context.Context,
+	target VerificationTarget,
+) (PodUIDSet, error) {
+	pods, ownedReplicaSets, err := r.deploymentPods(ctx, target)
+	if err != nil {
+		return nil, err
+	}
+
+	uids := make(PodUIDSet)
+	for index := range pods {
+		pod := &pods[index]
+		controller := metav1.GetControllerOfNoCopy(pod)
+		if controller == nil {
+			continue
+		}
+		if _, ok := ownedReplicaSets[string(controller.UID)]; !ok {
+			continue
+		}
+		if pod.UID != "" {
+			uids[pod.UID] = struct{}{}
+		}
+	}
+	return uids, nil
+}
+
+func (r *DeploymentPodResolver) deploymentPods(
+	ctx context.Context,
+	target VerificationTarget,
+) ([]corev1.Pod, map[string]struct{}, error) {
+	if r.Reader == nil {
+		return nil, nil, fmt.Errorf("resolve deployment pod: Kubernetes reader is required")
+	}
+
+	deployment := &appsv1.Deployment{}
+	if err := r.Reader.Get(ctx, target.Deployment, deployment); err != nil {
+		return nil, nil, fmt.Errorf(
+			"read deployment %s/%s: %w",
+			target.Deployment.Namespace,
+			target.Deployment.Name,
+			err,
+		)
+	}
+	if deployment.Spec.Selector == nil {
+		return nil, nil, fmt.Errorf("resolve deployment pod: deployment selector is required")
+	}
+
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return nil, nil, fmt.Errorf("resolve deployment pod: invalid deployment selector: %w", err)
+	}
+
+	replicaSets := &appsv1.ReplicaSetList{}
+	if err := r.Reader.List(
+		ctx,
+		replicaSets,
+		client.InNamespace(target.Deployment.Namespace),
+		client.MatchingLabelsSelector{Selector: selector},
+	); err != nil {
+		return nil, nil, fmt.Errorf("list deployment ReplicaSets: %w", err)
+	}
+	ownedReplicaSets := make(map[string]struct{}, len(replicaSets.Items))
+	for index := range replicaSets.Items {
+		replicaSet := &replicaSets.Items[index]
+		if metav1.IsControlledBy(replicaSet, deployment) {
+			ownedReplicaSets[string(replicaSet.UID)] = struct{}{}
+		}
+	}
+
+	pods := &corev1.PodList{}
+	if err := r.Reader.List(
+		ctx,
+		pods,
+		client.InNamespace(target.Deployment.Namespace),
+		client.MatchingLabelsSelector{Selector: selector},
+	); err != nil {
+		return nil, nil, fmt.Errorf("list deployment Pods: %w", err)
+	}
+	return pods.Items, ownedReplicaSets, nil
+}
+
 func eligibleDeploymentPod(
 	pod *corev1.Pod,
 	ownedReplicaSets map[string]struct{},
@@ -130,29 +169,8 @@ func eligibleDeploymentPod(
 	if pod.Name == target.OriginalPod.Name {
 		return false
 	}
-	return !pod.CreationTimestamp.Time.Before(actionSecond(target.ActionStartedAt))
-}
-
-// actionSecond truncates the action start to the precision Kubernetes actually
-// reports Pod creation at.
-//
-// metav1.Time serializes as RFC3339 with *second* granularity, so every
-// CreationTimestamp read back from the API server has a zero sub-second part,
-// while ActionStartedAt carries full monotonic precision. Comparing them
-// directly rejects any replacement created in the same wall-clock second the
-// action started — and since RestartPod deletes a Pod and the ReplicaSet
-// controller replaces it within milliseconds, that is the normal case, not an
-// edge case. The replacement was then ineligible for the entire readiness
-// timeout, so a genuinely recovered workload was reported as rolled_back and
-// restart_pod could never reach OutcomeRecovered.
-//
-// One second is the floor on what the API can distinguish, so this is a
-// tolerance rather than a fix for a comparison that was merely off. Widening
-// it that far is safe here because the original Pod is already excluded by
-// name above, and every other candidate must be controller-owned by a
-// ReplicaSet of the target Deployment.
-func actionSecond(actionStartedAt time.Time) time.Time {
-	return actionStartedAt.Truncate(time.Second)
+	_, existedBeforeAction := target.PreActionPodUIDs[pod.UID]
+	return !existedBeforeAction
 }
 
 func podSpecHasContainer(pod *corev1.Pod, containerName string) bool {
