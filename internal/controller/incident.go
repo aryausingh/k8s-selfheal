@@ -308,7 +308,7 @@ func (r *PodReconciler) closedIncident(key string) (incidentClosure, bool) {
 // rolled_back is an attempt outcome rather than an incident outcome. The
 // controller therefore only fills the three genuine gaps and does not invent
 // a second state machine above Owner 2's frozen lifecycle.
-func (r *PodReconciler) auditIncidentClosed(ctx context.Context, closure incidentClosure) {
+func (r *PodReconciler) auditIncidentClosed(ctx context.Context, podRef string, closure incidentClosure) {
 	if r.Audit == nil {
 		return
 	}
@@ -316,6 +316,7 @@ func (r *PodReconciler) auditIncidentClosed(ctx context.Context, closure inciden
 		IncidentID:    closure.id,
 		AttemptNumber: closure.attempts,
 		Timestamp:     time.Now(),
+		Pod:           podRef,
 		State:         safety.StateLogged,
 		Action:        "",
 		Result:        closure.outcome,
@@ -331,11 +332,11 @@ func (r *PodReconciler) auditIncidentClosed(ctx context.Context, closure inciden
 // closeIncidentIfTerminal writes the missing terminal line when the last call
 // ended the incident, and does nothing for active incidents or recovered,
 // which Service.Remediate already logged.
-func (r *PodReconciler) closeIncidentIfTerminal(ctx context.Context, key string) {
+func (r *PodReconciler) closeIncidentIfTerminal(ctx context.Context, key, podRef string) {
 	if closure, closed := r.closedIncident(key); closed {
 		if closure.outcome == OutcomeRecovered {
 			return
 		}
-		r.auditIncidentClosed(ctx, closure)
+		r.auditIncidentClosed(ctx, podRef, closure)
 	}
 }

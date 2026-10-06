@@ -692,7 +692,7 @@ func TestIncident_ExhaustionWritesATerminalLoggedLine(t *testing.T) {
 	if _, decision := r.beginAttempt(key, 1, start.Add(time.Hour)); decision != admitExhausted {
 		t.Fatalf("setup: expected the budget to be spent")
 	}
-	r.closeIncidentIfTerminal(ctx, key)
+	r.closeIncidentIfTerminal(ctx, key, "ns1/pod-x")
 
 	terminal := audit.terminalLines()
 	if len(terminal) != 1 {

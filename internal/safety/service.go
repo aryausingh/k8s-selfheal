@@ -3,6 +3,7 @@ package safety
 import (
 	"context"
 	"fmt"
+	"path"
 	"time"
 
 	"k8s.io/apimachinery/pkg/types"
@@ -47,6 +48,7 @@ func (s *Service) Remediate(ctx context.Context, event DetectionEvent) (Outcome,
 			IncidentID:    event.IncidentID,
 			AttemptNumber: event.AttemptNumber,
 			Timestamp:     s.Clock.Now(),
+			Pod:           path.Join(event.Namespace, event.PodName),
 			State:         state,
 			Action:        s.Action.Name(),
 			Result:        result,

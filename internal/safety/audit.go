@@ -22,11 +22,19 @@ type AuditEntry struct {
 	IncidentID    string    `json:"incidentID"`
 	AttemptNumber int       `json:"attemptNumber"`
 	Timestamp     time.Time `json:"timestamp"`
-	State         State     `json:"state"`
-	Action        string    `json:"action"`
-	Result        string    `json:"result"`
-	Workload      string    `json:"workload"`
-	ArmLabel      string    `json:"armLabel"`
+
+	// Pod is "namespace/name". It is what makes a line self-attributing:
+	// without it an incident cannot be tied to a workload unless every run is
+	// executed serially with its own --audit-workload, which costs hours of
+	// cluster time the experiment schedule does not have. Present in the
+	// Week 2 schema, restored here.
+	Pod string `json:"pod"`
+
+	State    State  `json:"state"`
+	Action   string `json:"action"`
+	Result   string `json:"result"`
+	Workload string `json:"workload"`
+	ArmLabel string `json:"armLabel"`
 }
 
 // AuditWriter appends one entry for a lifecycle transition.
