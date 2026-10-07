@@ -203,6 +203,17 @@ without the operator choosing between them.
 
 ### Terminal layout for this
 
+**Order matters: scale up FIRST, then open the streams.** `kubectl logs -f`
+against a Deployment with zero replicas has no pod to follow — it waits and
+then dies with `error: timed out waiting for the condition`. The controller is
+at zero during pre-flight, so streams opened beforehand are already dead by
+the time you need them.
+
+Nothing is lost by starting them after: the pod is up in about ten seconds and
+detection takes 19-42s. Narrate the gap — *"starting the controller now; and
+here are its logs, one terminal per failing workload"* — and the audience
+watches empty terminals fill rather than two that errored before you began.
+
 Two log streams, each filtered to one workload, side by side:
 
 ```bash
