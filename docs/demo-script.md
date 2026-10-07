@@ -214,17 +214,30 @@ detection takes 19-42s. Narrate the gap — *"starting the controller now; and
 here are its logs, one terminal per failing workload"* — and the audience
 watches empty terminals fill rather than two that errored before you began.
 
-Two log streams, each filtered to one workload, side by side:
+**Stream the logs over SSH, not through the tunnel.** `kubectl logs -f`
+through the port-forward returns instantly and silently — the tunnel will
+serve ordinary requests but will not hold the long-lived watch connection
+`-f` needs. `kubectl logs --tail=N` works fine, so the tunnel looks healthy
+while the stream quietly refuses to start. This cost twenty minutes on demo
+morning.
+
+Each of these is a single line — nothing to mangle on paste — and neither
+needs `KUBECONFIG` or the tunnel at all. The `grep`s run locally.
+
+**Terminal 2 — happy path:**
 
 ```bash
-# Terminal 1 — the happy path
-kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f \
-  | grep --line-buffered -E 'DETECTED|Collected|remediation finished' | grep --line-buffered fixable
-
-# Terminal 2 — the rollback
-kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f \
-  | grep --line-buffered -E 'DETECTED|remediation finished' | grep --line-buffered unrecoverable
+ssh azureuser@20.219.66.205 "sudo k3s kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f" | grep --line-buffered -E "DETECTED|Collected|remediation finished" | grep --line-buffered fixable
 ```
+
+**Terminal 3 — rollback:**
+
+```bash
+ssh azureuser@20.219.66.205 "sudo k3s kubectl logs -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager -c manager -f" | grep --line-buffered -E "DETECTED|remediation finished" | grep --line-buffered unrecoverable
+```
+
+The tunnel is then only needed by Terminal 4, for `scale` and `get`. One
+fewer thing that can fail on stage.
 
 ### The live moment
 
