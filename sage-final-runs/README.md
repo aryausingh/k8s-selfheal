@@ -70,6 +70,18 @@ slide must say which one it means:
 - per **attempt**, as the controller's own outcome: W1-enabled is 5/5
   `rolled_back`.
 
+## Why these lines carry no `workload` or `armLabel`
+
+`safety.AuditEntry` declares nine fields; lines in this directory have seven.
+The image deployed on the VM for these runs predates the
+`--audit-workload` / `--audit-arm` flags that populate
+`safety.AuditMetadata`, so those two keys are absent. The kind cross-check
+runs under [`runs/`](../runs/), produced after the flags landed, do carry
+`armLabel`.
+
+No reported number depends on them: `results.py` reads the workload and the
+arm from each run's `meta.json`, which the harness writes directly.
+
 ## Regenerating the numbers
 
 ```bash
