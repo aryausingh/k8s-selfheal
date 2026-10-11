@@ -161,6 +161,38 @@ kubectl patch deployment rollout-fixable-demo --type=json -p \
 kubectl get pods -l app=rollout-fixable-demo -w     # wait for CrashLoopBackOff, then Ctrl-C
 ```
 
+**Then stage W3 the same way.** This is segment 3's workload — the rollback,
+the one you lead with. Both revisions are broken, which is why it has to be
+staged with the controller still at zero: with the controller running,
+`rollout_undo` fires against revision 1 and fails with "no prior revision
+available" before you ever get to revision 2.
+
+```bash
+# revision 1 — already broken, on purpose
+sed 's/"echo bad-2; exit 1"/"echo bad-1; exit 1"/' hack/manifests/rollout-unrecoverable.yaml \
+  | kubectl apply -f -
+
+# do NOT wait for rollout status here — it never succeeds, that is the point.
+# Wait for CrashLoopBackOff instead, then Ctrl-C:
+kubectl get pods -l app=rollout-unrecoverable-demo -w
+
+# revision 2 — equally broken, and a genuine template diff from revision 1
+kubectl patch deployment rollout-unrecoverable-demo --type=json -p \
+  '[{"op":"replace","path":"/spec/template/spec/containers/0/command","value":["sh","-c","echo bad-2; exit 1"]}]'
+
+kubectl get pods -l app=rollout-unrecoverable-demo -w   # CrashLoopBackOff again, Ctrl-C
+```
+
+Both staged, controller still at zero. Confirm before you stop:
+
+```bash
+kubectl get pods -l app=rollout-fixable-demo -l app=rollout-unrecoverable-demo 2>/dev/null
+kubectl get pods | grep -E 'rollout-(fixable|unrecoverable)-demo'
+# expect: both CrashLoopBackOff
+kubectl get deploy -n k8s-selfheal-system k8s-selfheal-controller-manager
+# expect: READY 0/0
+```
+
 **Terminal layout.** Four, pre-arranged, before anyone is watching:
 
 | Terminal | Contents |
@@ -383,6 +415,85 @@ that file as root. The manager runs as UID 65532. Fix:
 kubectl exec -n k8s-selfheal-system audit-reader -- rm -f /audit/audit.jsonl
 kubectl rollout restart -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager
 ```
+
+---
+
+## Recording the fallback
+
+Three recordings, one per live segment. Segments 1 and 6 are slides — the deck
+is already its own backup, so don't film them.
+
+| File | Covers | Length | Re-stage cost before a retake |
+|---|---|---|---|
+| `s23-live.mov` | segments 2+3, one scale-up | ~2:20 | ~3 min |
+| `s4-exhausted.mov` | segment 4, archived log | ~0:30 | none |
+| `s5-baseline.mov` | segment 5, W1 unaided | ~1:15 | ~1 min |
+
+**Record from the staged state, with the scale-up on camera.** Pre-flight is
+not in the recording — but `kubectl scale` is, because that command is the
+whole claim that the controller is seeing these failures for the first time. A
+recording that opens on already-running logs is indistinguishable from a
+pre-baked one.
+
+### Before the first take
+
+```bash
+# macOS: stop a notification landing mid-take
+# Control Centre → Focus → Do Not Disturb
+```
+
+- **Bump the terminal font** two or three sizes (`Cmd +`). What is readable on
+  your laptop is not readable on a projector, and you cannot fix it later.
+- **Record the full screen**, not a selected region, so the four-terminal
+  layout is visible — that layout is itself part of the explanation.
+- **No microphone.** You narrate live over the playback, which sounds better
+  than a voice-over fighting your own voice, and a silent take stays usable
+  even if you fluff a sentence. Record one narrated take *afterwards* for the
+  2-minute interview cut, where narration is the point.
+- `Cmd-Shift-5` → Options → **Save to Desktop**, **Show Mouse Clicks** on →
+  Record Entire Screen. Stop from the menu bar, or `Cmd-Control-Esc`.
+
+### Take sequence for `s23-live.mov`
+
+Staged state: both workloads CrashLoopBackOff, controller `0/0`, four
+terminals arranged, Terminal 4 holding the scale command **typed but not run**.
+
+1. Start recording. Let it sit for three or four seconds — a hard cut straight
+   into a keystroke is disorienting on playback.
+2. **Terminal 4:** run the scale-up.
+3. **Terminals 2 and 3:** start the two SSH log streams. In that order —
+   streams opened before the scale-up have no pod to follow and die with
+   `timed out waiting for the condition`.
+4. Wait. `DETECTED` at +19–42s, `rolled_back` at ~+84s, `recovered` at ~+90s.
+   Do not touch anything while waiting; dead air is fine, you'll be talking
+   over it.
+5. Once both `remediation finished` lines are on screen, count to five and
+   stop. The pause gives you room to land the sentence over the result.
+
+### Resetting between takes
+
+```bash
+kubectl scale -n k8s-selfheal-system deploy/k8s-selfheal-controller-manager --replicas=0
+kubectl wait --for=delete pod -n k8s-selfheal-system -l control-plane=controller-manager --timeout=60s
+kubectl delete deploy rollout-fixable-demo rollout-unrecoverable-demo --ignore-not-found
+```
+
+Then re-stage both workloads exactly as in pre-flight. Scaling the controller
+to zero is also what makes a retake clean: incident state — budget, backoff,
+cooldown, sticky `exhausted` — lives in the manager process's memory, so
+killing the pod wipes it. A take never inherits the previous take's attempt
+count.
+
+**Budget three takes** and watch the first one back before shooting the
+second. The usual faults are font too small, a notification, and stopping the
+recording before the second `remediation finished` line lands.
+
+### Where the files live
+
+Desktop is fine while shooting; before demo day move them somewhere you can
+open in two clicks under pressure, **on the laptop you are bringing** — not
+only in cloud storage. Open them in QuickTime ahead of time so the player is
+already running and the right file is already loaded.
 
 ---
 
